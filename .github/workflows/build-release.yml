@@ -1,0 +1,75 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Dalamud build references
+        shell: pwsh
+        run: |
+          $dalamudDev = Join-Path $env:APPDATA 'XIVLauncher\addon\Hooks\dev'
+          New-Item -ItemType Directory -Path $dalamudDev -Force | Out-Null
+          Invoke-WebRequest -Uri 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile 'dalamud-latest.zip'
+          Expand-Archive -LiteralPath 'dalamud-latest.zip' -DestinationPath $dalamudDev -Force
+
+      - name: Build plugin package
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME.TrimStart('v')
+            if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw 'Use a vX.Y.Z release tag.' }
+            dotnet build RetainerPricer.csproj --configuration Release --locked-mode "-p:Version=$version"
+          } else {
+            dotnet build RetainerPricer.csproj --configuration Release --locked-mode
+          }
+
+      - name: Upload build package
+        uses: actions/upload-artifact@v4
+        with:
+          name: RetainerPricer
+          path: dist/Release/RetainerPricer/latest.zip
+          if-no-files-found: error
+
+      - name: Refresh Dalamud feed and publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $manifest = 'dist/Release/RetainerPricer/RetainerPricer.json'
+          $feedPath = Join-Path $env:RUNNER_TEMP 'repo.json'
+          ./scripts/Update-RepoManifest.ps1 -ManifestPath $manifest -OutputPath $feedPath
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main
+          git switch --create feed-update --track origin/main
+          Copy-Item -LiteralPath $feedPath -Destination repo.json -Force
+          git add repo.json
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "chore: update Dalamud feed for $env:GITHUB_REF_NAME"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          }
+          gh release create $env:GITHUB_REF_NAME 'dist/Release/RetainerPricer/latest.zip' --title "Retainer Pricer $env:GITHUB_REF_NAME" --generate-notes
