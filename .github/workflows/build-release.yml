@@ -39,9 +39,9 @@ jobs:
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $version = $env:GITHUB_REF_NAME.TrimStart('v')
             if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw 'Use a vX.Y.Z release tag.' }
-            dotnet build RetainerPricer.csproj --configuration Release --locked-mode "-p:Version=$version"
+            dotnet build RetainerPricer.csproj --configuration Release "-p:RestoreLockedMode=true" "-p:Version=$version"
           } else {
-            dotnet build RetainerPricer.csproj --configuration Release --locked-mode
+            dotnet build RetainerPricer.csproj --configuration Release -p:RestoreLockedMode=true
           }
 
       - name: Upload build package
