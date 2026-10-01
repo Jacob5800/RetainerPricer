@@ -15,7 +15,7 @@ public static class PriceCalculator
         IReadOnlySet<ulong> ownRetainerIds,
         uint minimumPrice,
         DateTimeOffset now,
-        TimeSpan maxAge)
+        TimeSpan? maxAge)
     {
         static PriceProposal Fail(string message, uint lowest = 0, int count = 0) => new(lowest, 0, count, message);
 
@@ -29,11 +29,11 @@ public static class PriceCalculator
             return Fail("The market results are incomplete. Refresh the full local comparison before applying.");
         if (snapshot.Listings is null || ownRetainerIds is null)
             return Fail("Market or retainer data is missing. Fetch prices again.");
-        if (maxAge <= TimeSpan.Zero)
+        if (maxAge is { } maximumAge && maximumAge <= TimeSpan.Zero)
             return Fail("The maximum price age must be greater than zero.");
         if (snapshot.ObservedAt == default || snapshot.ObservedAt > now)
             return Fail("The market timestamp is missing or in the future. Fetch prices again.");
-        if (now - snapshot.ObservedAt > maxAge)
+        if (maxAge is { } ageLimit && now - snapshot.ObservedAt > ageLimit)
             return Fail("These market prices are too old. Refresh prices before applying.");
         if (minimumPrice > MaximumPrice)
             return Fail("The minimum price exceeds the game's maximum asking price.");
@@ -44,10 +44,13 @@ public static class PriceCalculator
         {
             // Reject corrupt data instead of silently hiding a possibly cheaper listing.
             if (listing is null || listing.ItemId != itemId || listing.PricePerUnit is 0 or > MaximumPrice ||
-                listing.Quantity == 0 || listing.RetainerId == 0)
-                return Fail("A market listing is invalid or missing its retainer ID. Refresh prices before applying.");
-            if (listing.IsHq != isHq || listing.OnMannequin || ownRetainerIds.Contains(listing.RetainerId))
+                listing.Quantity == 0)
+                return Fail("A market listing is invalid. Refresh prices before applying.");
+            if (listing.IsHq != isHq || listing.OnMannequin)
                 continue;
+            if (listing.RetainerId == 0)
+                return Fail("A matching listing did not include its retainer ID, so your own stock cannot be excluded safely. Try a local comparison.");
+            if (ownRetainerIds.Contains(listing.RetainerId)) continue;
 
             lowest = Math.Min(lowest, listing.PricePerUnit);
             matches++;

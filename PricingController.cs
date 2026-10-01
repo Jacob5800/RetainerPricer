@@ -11,7 +11,7 @@ internal sealed class PriceRow(SellItem item)
 
 internal sealed class PricingController : IDisposable
 {
-    private enum Work { Idle, Single, Scan, Apply }
+    private enum Work { Idle, Single, Manual, Scan, Apply }
     private enum Step { Start, Opening, Quote, Closing, Confirming }
     private readonly NativeMarketBridge bridge;
     private readonly UniversalisClient universalis;
@@ -26,6 +26,7 @@ internal sealed class PricingController : IDisposable
     private DateTimeOffset nextTick;
     private DateTimeOffset deadline;
     private SellItem? workingItem;
+    private ManualQuoteTarget? manualTarget;
     private MarketSession? session;
     private bool autoApply;
     private bool localRequested;
@@ -33,12 +34,17 @@ internal sealed class PricingController : IDisposable
     private uint submittedPrice;
     private List<PriceRow> applying = [];
 
+    private sealed record ManualQuoteTarget(ItemChoice Item, bool IsHq, MarketWorld World);
+
     public PricingController(NativeMarketBridge bridge, UniversalisClient universalis, PluginConfig config)
         => (this.bridge, this.universalis, this.config) = (bridge, universalis, config);
 
     public SellItem? CurrentItem { get; private set; }
     public PriceSnapshot? CurrentSnapshot { get; private set; }
     public PriceProposal? CurrentProposal { get; private set; }
+    public PriceSnapshot? ManualSnapshot { get; private set; }
+    public PriceProposal? ManualProposal { get; private set; }
+    public string? ManualQuoteWarning { get; private set; }
     public List<PriceRow> Rows { get; } = [];
     public bool Busy => work != Work.Idle;
     public bool CanUpdateExisting => bridge.RetainerAvailabilityError is null;
@@ -54,6 +60,7 @@ internal sealed class PricingController : IDisposable
         if (now < nextTick) return;
         nextTick = now.AddMilliseconds(250);
         CurrentItem = bridge.TryReadSellItem(out var selected, out _) ? selected : null;
+        if (work == Work.Manual) { TickManual(now); return; }
         if (work != Work.Idle && (session is null || !bridge.TryGetSession(out var active, out _) || active != session))
         {
             Cancel("Stopped because the character, world or retainer changed.");
@@ -66,13 +73,28 @@ internal sealed class PricingController : IDisposable
                 seenDialog = item.DialogGeneration;
                 CurrentSnapshot = null;
                 CurrentProposal = null;
-                if (config.AutoPriceNewListings && !item.IsExisting) CheckCurrent(true);
+                if (config.AutoPriceNewListings && !item.IsExisting && !IsExcluded(item.ItemId)) CheckCurrent(true);
             }
             return;
         }
         if (work == Work.Single) TickSingle(now);
         else if (work == Work.Scan) TickScan(now);
         else TickApply(now);
+    }
+
+    public void CheckManualItem(ItemChoice item, bool isHq, MarketWorld world)
+    {
+        if (Busy) return;
+        if (item.ItemId == 0 || world.WorldId == 0) { Status = "Choose a valid item and wait for your home-world data."; return; }
+        ResetRequest();
+        manualTarget = new ManualQuoteTarget(item, isHq, world);
+        ManualSnapshot = null;
+        ManualProposal = null;
+        ManualQuoteWarning = null;
+        step = Step.Start;
+        work = Work.Manual;
+        session = null;
+        Status = $"Retrieving {item.Name}{(isHq ? " (HQ)" : " (NQ)")} on {world.Name} from Universalis...";
     }
 
     public void CheckCurrent(bool fillAutomatically = false)
@@ -110,6 +132,8 @@ internal sealed class PricingController : IDisposable
         if (!bridge.TryGetSession(out var active, out var error)) { Status = error; return; }
         var items = bridge.ReadExistingListings(out error);
         if (items.Count == 0) { Status = string.IsNullOrEmpty(error) ? "This retainer has no listings." : error; return; }
+        items = items.Where(item => !IsExcluded(item.ItemId)).ToList();
+        if (items.Count == 0) { Status = "Every listing on this retainer is in the item exception list."; return; }
         Rows.Clear();
         Rows.AddRange(items.Select(x => new PriceRow(x)));
         session = active;
@@ -126,7 +150,7 @@ internal sealed class PricingController : IDisposable
         if (Busy) return;
         if (!CanUpdateExisting) { Status = ExistingUpdateError!; return; }
         if (bridge.TryReadSellItem(out _, out _)) { Status = "Close the individual selling window before updating the reviewed listings."; return; }
-        applying = Rows.Where(x => x.Selected && x.Proposal is { CanApply: true }
+        applying = Rows.Where(x => x.Selected && !IsExcluded(x.Item.ItemId) && x.Proposal is { CanApply: true }
             && x.Proposal.SuggestedPrice != x.Item.CurrentPrice
             && (!config.OnlyLowerExistingPrices || x.Proposal.SuggestedPrice < x.Item.CurrentPrice)).ToList();
         if (applying.Count == 0) { Status = "No selected price changes to apply."; return; }
@@ -137,6 +161,52 @@ internal sealed class PricingController : IDisposable
         index = 0;
         step = Step.Start;
         Status = "Applying the selected prices. Keep this retainer's selling list open.";
+    }
+
+    private void TickManual(DateTimeOffset now)
+    {
+        if (manualTarget is null) { FinishManual("Item lookup stopped."); return; }
+        if (bridge.GetHomeWorld()?.WorldId != manualTarget.World.WorldId)
+        { FinishManual("Item lookup stopped because the home-world data changed. Search again."); return; }
+        if (step == Step.Start)
+        {
+            deadline = now.AddSeconds(25);
+            quoteTask = universalis.FetchAsync(manualTarget.World.WorldId, manualTarget.Item.ItemId, cancellation.Token);
+            step = Step.Quote;
+        }
+        if (quoteTask is { IsCompleted: true } task)
+        {
+            quoteTask = null;
+            try { ManualSnapshot = task.GetAwaiter().GetResult(); }
+            catch (Exception ex)
+            {
+                FinishManual(ex is OperationCanceledException ? "Price lookup cancelled." : ex.Message);
+                return;
+            }
+            if (ManualSnapshot is null) { FinishManual("Universalis returned no price data."); return; }
+            var hasOwnRetainerIds = bridge.TryGetOwnRetainerIds(out var ownRetainerIds);
+            ManualProposal = Calculate(ManualSnapshot, manualTarget.Item.ItemId, manualTarget.World.WorldId,
+                manualTarget.IsHq, ownRetainerIds);
+            if (!hasOwnRetainerIds)
+                ManualQuoteWarning = "Your retainer IDs have not loaded, so this read-only quote may include your own listing. Open any retainer list before relying on the undercut price.";
+            else if (!ManualProposal.CanApply && ManualProposal.Error?.Contains("did not include its retainer ID", StringComparison.OrdinalIgnoreCase) == true)
+                ManualQuoteWarning = "One or more matching listings omit seller identity. Their prices are shown above, but they cannot be excluded safely from an undercut.";
+            FinishManual(ManualProposal.CanApply ? "Price retrieved." : ManualProposal.Error!);
+            return;
+        }
+        if (now > deadline)
+        {
+            cancellation.Cancel();
+            FinishManual("Universalis did not respond in time. Try again or choose Local while an item sell window is open.");
+        }
+    }
+
+    private void FinishManual(string message)
+    {
+        work = Work.Idle;
+        manualTarget = null;
+        Status = message;
+        ResetRequest();
     }
 
     private void TickSingle(DateTimeOffset now)
@@ -305,8 +375,14 @@ internal sealed class PricingController : IDisposable
     }
 
     private PriceProposal Calculate(PriceSnapshot snapshot, SellItem item)
-        => PriceCalculator.Calculate(snapshot, item.ItemId, item.Session.WorldId, item.IsHq,
-            bridge.OwnRetainerIds(), (uint)config.MinimumPrice, DateTimeOffset.UtcNow, TimeSpan.FromMinutes(config.MaximumAgeMinutes));
+        => Calculate(snapshot, item.ItemId, item.Session.WorldId, item.IsHq, bridge.OwnRetainerIds());
+
+    private PriceProposal Calculate(PriceSnapshot snapshot, uint itemId, uint worldId, bool isHq,
+        IReadOnlySet<ulong> ownRetainerIds)
+        => PriceCalculator.Calculate(snapshot, itemId, worldId, isHq, ownRetainerIds, (uint)config.MinimumPrice,
+            DateTimeOffset.UtcNow, config.UseMaximumPriceAge ? TimeSpan.FromMinutes(config.MaximumAgeMinutes) : null);
+
+    private bool IsExcluded(uint itemId) => config.ExcludedItemIds.Contains(itemId);
 
     private void ResetRequest()
     {
@@ -323,6 +399,7 @@ internal sealed class PricingController : IDisposable
     {
         ResetRequest();
         work = Work.Idle;
+        manualTarget = null;
         Status = message;
     }
 

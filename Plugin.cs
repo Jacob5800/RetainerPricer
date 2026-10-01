@@ -2,6 +2,7 @@ using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using Item = Lumina.Excel.Sheets.Item;
 
 namespace RetainerPricer;
 
@@ -29,8 +30,13 @@ public sealed class Plugin : IDalamudPlugin
         config.Normalize();
         bridge = new NativeMarketBridge(gameGui, data, player, addons, interop, sigScanner, log);
         controller = new PricingController(bridge, universalis, config);
-        window = new MainWindow(config, controller, Save, Dispatch, () => bridge.LocalAvailabilityError,
-            () => bridge.RetainerAvailabilityError);
+        var itemChoices = data.GetExcelSheet<Item>()
+            .Select(item => new ItemChoice(item.RowId, item.Name.ToString()))
+            .Where(item => item.ItemId != 0 && !string.IsNullOrWhiteSpace(item.Name))
+            .OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        window = new MainWindow(config, controller, itemChoices, bridge.GetHomeWorld, Save, Dispatch,
+            () => bridge.LocalAvailabilityError, () => bridge.RetainerAvailabilityError);
         windows.AddWindow(window);
         if (bridge.LocalAvailabilityError is { } localCompatibilityError)
             log.Warning("Retainer Pricer local pricing: {Error}", localCompatibilityError);

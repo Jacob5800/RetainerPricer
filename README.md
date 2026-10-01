@@ -4,12 +4,13 @@ Dalamud API 15 development plugin for pricing items in the retainer sale window.
 
 ## Use
 
-1. Open the plugin with `/retainerpricer` while viewing a retainer's selling list.
+1. Open the plugin with `/retainerpricer` from the main menu or while viewing a retainer's selling list.
 2. Choose **Universalis** for a same-world community price snapshot or **Local marketboard** to request a fresh in-game comparison.
-3. For a new listing, leave **Automatically price new listings** enabled, then open the item's sale window. The plugin fills the price field; confirm the listing with the game's own button.
-4. For existing listings, keep the sale list open, choose **Update existing listings**, review the proposed prices and selected rows, then choose **Apply selected updates**.
+3. From the main window's **Price lookup** tab, search for any item and retrieve its home-world price from Universalis. This is a read-only lookup and does not need a retainer sale window.
+4. For a new listing, leave **Automatically price new listings** enabled, then open the item's sale window. The plugin fills the price field; confirm the listing with the game's own button.
+5. For existing listings, keep the sale list open, choose **Update existing listings**, review the proposed prices and selected rows, then choose **Apply selected updates**.
 
-Prices are per item, compare HQ and NQ separately, exclude listings from your retainers, and target one gil below the lowest usable competing listing. Minimum price and maximum age settings are available in the plugin. Existing listing updates are checked again immediately before submission. Each accepted update uses the game's own sale window and registered Confirm action; it is not submitted as an unattended background market action.
+Prices are per item, compare HQ and NQ separately, exclude listings from your retainers, and target one gil below the lowest usable competing listing. The optional maximum-age filter is off by default. Add or remove persistent item exceptions under **Settings**; excluded items are skipped by automatic new-listing pricing and existing-listing scans, while manual lookups remain available. Existing listing updates are checked again immediately before submission. Each accepted update uses the game's own sale window and registered Confirm action; it is not submitted as an unattended background market action.
 
 Universalis requests are on demand and are limited to the selected item and home world. The plugin does not upload player or market data.
 

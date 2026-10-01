@@ -8,16 +8,27 @@ internal sealed class MainWindow : Window
 {
     private readonly PluginConfig config;
     private readonly PricingController controller;
+    private readonly IReadOnlyList<ItemChoice> itemChoices;
+    private readonly Func<MarketWorld?> homeWorld;
     private readonly Action save;
     private readonly Action<Action> dispatch;
     private readonly Func<string?> localError;
     private readonly Func<string?> retainerError;
+    private string lookupSearch = "";
+    private string lookupSearchCache = "";
+    private List<ItemChoice> lookupMatches = [];
+    private ItemChoice? lookupSelection;
+    private bool lookupHq;
+    private string exceptionSearch = "";
+    private string exceptionSearchCache = "";
+    private List<ItemChoice> exceptionMatches = [];
 
-    public MainWindow(PluginConfig config, PricingController controller, Action save, Action<Action> dispatch,
+    public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
+        Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
         Func<string?> localError, Func<string?> retainerError) : base("Retainer Pricer")
     {
-        (this.config, this.controller, this.save, this.dispatch, this.localError, this.retainerError) =
-            (config, controller, save, dispatch, localError, retainerError);
+        (this.config, this.controller, this.itemChoices, this.homeWorld, this.save, this.dispatch, this.localError, this.retainerError) =
+            (config, controller, itemChoices, homeWorld, save, dispatch, localError, retainerError);
         Size = new Vector2(860, 640);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -35,7 +46,9 @@ internal sealed class MainWindow : Window
         if (ImGui.Combo("Price source", ref source, "Universalis\0Local marketboard\0"))
         { config.Source = (PriceSource)source; save(); }
         if (config.Source == PriceSource.Universalis)
-            ImGui.TextWrapped("Universalis contains prices uploaded by players. Old or incomplete results will be skipped; switch to Local for a fresh game check.");
+            ImGui.TextWrapped(config.UseMaximumPriceAge
+                ? $"Universalis uses player-uploaded prices and skips data older than {config.MaximumAgeMinutes} minutes. Switch to Local for a fresh game check."
+                : "Universalis uses player-uploaded prices. Price age is not filtered; switch to Local for a fresh game check.");
         else
         {
             ImGui.TextWrapped("Local opens Compare Prices for the item and waits for the complete marketboard response. Batch checks open one listing at a time.");
@@ -53,6 +66,7 @@ internal sealed class MainWindow : Window
         if (ImGui.BeginTabBar("##pricingTabs"))
         {
             if (ImGui.BeginTabItem("New / selected item")) { DrawCurrent(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("Price lookup")) { DrawManualLookup(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Existing listings")) { DrawExisting(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Settings")) { DrawSettings(); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
@@ -64,7 +78,7 @@ internal sealed class MainWindow : Window
         var item = controller.CurrentItem;
         if (item is null)
         {
-            ImGui.TextWrapped("Open your retainer's selling list, then choose an item to sell or adjust an existing listing's price. Retainer Pricer will identify the item and quantity.");
+            ImGui.TextWrapped("Open Price lookup to search and retrieve a home-world price from the main menu. For automatic pricing, open your retainer's selling list and choose an item to sell or adjust.");
             return;
         }
         ImGui.TextUnformatted($"{item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")} · {item.Quantity:N0} items");
@@ -151,14 +165,137 @@ internal sealed class MainWindow : Window
         if (ImGui.InputInt("Minimum price per item (gil)", ref minimum))
         { config.MinimumPrice = minimum; config.Normalize(); save(); }
         var age = config.MaximumAgeMinutes;
-        ImGui.SetNextItemWidth(160);
-        if (ImGui.InputInt("Maximum price age (minutes)", ref age))
-        { config.MaximumAgeMinutes = age; config.Normalize(); save(); }
+        var filterAge = config.UseMaximumPriceAge;
+        if (ImGui.Checkbox("Filter out prices older than", ref filterAge))
+        { config.UseMaximumPriceAge = filterAge; save(); }
+        if (config.UseMaximumPriceAge)
+        {
+            ImGui.SetNextItemWidth(160);
+            if (ImGui.InputInt("Maximum age (minutes)", ref age))
+            { config.MaximumAgeMinutes = age; config.Normalize(); save(); }
+        }
         var open = config.OpenWithRetainer;
         if (ImGui.Checkbox("Open this window with the retainer selling list", ref open)) { config.OpenWithRetainer = open; save(); }
         ImGui.EndDisabled();
+        ImGui.Separator();
+        DrawExceptions();
         ImGui.TextWrapped("Prices are per item, before tax. If an undercut would be below your minimum, or no matching competitor is available, that item is left unchanged.");
         ImGui.TextWrapped("Closing the retainer or changing character/world stops a batch. Stop prevents further submissions; completed price changes stay applied.");
+    }
+
+    private void DrawManualLookup()
+    {
+        ImGui.TextWrapped("Search any item and retrieve its home-world price from Universalis without opening a retainer sale window. This lookup is read-only; it never changes a listing.");
+        ImGui.SetNextItemWidth(360);
+        ImGui.InputText("Search item", ref lookupSearch, 128);
+        if (!StringComparer.CurrentCultureIgnoreCase.Equals(lookupSearch, lookupSearchCache))
+            lookupSelection = null;
+        RefreshMatches(lookupSearch, ref lookupSearchCache, ref lookupMatches);
+        if (!string.IsNullOrWhiteSpace(lookupSearch) && lookupMatches.Count > 0)
+        {
+            ImGui.BeginChild("##lookupMatches", new Vector2(0, Math.Min(160, lookupMatches.Count * 22 + 8)), true);
+            foreach (var candidate in lookupMatches)
+            {
+                ImGui.PushID((int)candidate.ItemId);
+                if (ImGui.Selectable($"{candidate.Name}  ·  #{candidate.ItemId}", lookupSelection?.ItemId == candidate.ItemId))
+                {
+                    lookupSelection = candidate;
+                    lookupSearch = candidate.Name;
+                    lookupSearchCache = lookupSearch;
+                    lookupMatches = [];
+                }
+                ImGui.PopID();
+            }
+            ImGui.EndChild();
+        }
+        else if (lookupSearch.Trim().Length >= 2)
+            ImGui.TextDisabled("No item names match that search.");
+
+        if (lookupSelection is not { } selected) return;
+        ImGui.TextUnformatted($"Selected: {selected.Name} · item {selected.ItemId}");
+        var hq = lookupHq;
+        ImGui.BeginDisabled(controller.Busy);
+        if (ImGui.Checkbox("High Quality", ref hq)) lookupHq = hq;
+        ImGui.EndDisabled();
+        var world = homeWorld();
+        ImGui.TextUnformatted(world is null ? "Waiting for character home-world data." : $"World: {world.Name}");
+        ImGui.BeginDisabled(controller.Busy || world is null);
+        if (ImGui.Button("Retrieve price") && world is not null)
+            dispatch(() => controller.CheckManualItem(selected, lookupHq, world));
+        ImGui.EndDisabled();
+        if (controller.ManualQuoteWarning is { } warning) ImGui.TextWrapped(warning);
+        if (controller.ManualSnapshot is { } snapshot)
+        {
+            DrawAge(snapshot);
+            var comparable = snapshot.Listings.Where(listing => listing.IsHq == lookupHq && !listing.OnMannequin).ToArray();
+            if (comparable.Length > 0)
+                ImGui.TextUnformatted($"Lowest retrieved matching listing: {comparable.Min(listing => listing.PricePerUnit):N0} gil each");
+            else
+                ImGui.TextUnformatted("No matching HQ/NQ listings were included in this response.");
+            ImGui.TextUnformatted($"Received {snapshot.Listings.Count:N0} listings on {world?.Name ?? "the home world"}.");
+            if (controller.ManualProposal is { } proposal)
+            {
+                if (proposal.CanApply)
+                {
+                    if (controller.ManualQuoteWarning is null)
+                        ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.6f, 1), $"Suggested undercut: {proposal.SuggestedPrice:N0} gil each");
+                    else
+                        ImGui.TextUnformatted($"Reference undercut: {proposal.SuggestedPrice:N0} gil each");
+                }
+                else ImGui.TextWrapped(proposal.Error ?? "No usable price.");
+            }
+        }
+    }
+
+    private void DrawExceptions()
+    {
+        ImGui.TextUnformatted("Item exceptions");
+        ImGui.TextWrapped("Excluded items are skipped during automatic new-listing pricing and existing-listing scans. Manual price lookups remain available.");
+        ImGui.SetNextItemWidth(360);
+        ImGui.InputText("Find an item to exclude", ref exceptionSearch, 128);
+        RefreshMatches(exceptionSearch, ref exceptionSearchCache, ref exceptionMatches);
+        if (!string.IsNullOrWhiteSpace(exceptionSearch))
+        {
+            foreach (var candidate in exceptionMatches)
+            {
+                if (config.ExcludedItemIds.Contains(candidate.ItemId)) continue;
+                ImGui.PushID((int)candidate.ItemId);
+                ImGui.TextUnformatted($"{candidate.Name}  ·  #{candidate.ItemId}");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Add exception"))
+                {
+                    config.ExcludedItemIds.Add(candidate.ItemId);
+                    config.Normalize();
+                    save();
+                }
+                ImGui.PopID();
+            }
+        }
+        if (config.ExcludedItemIds.Count == 0) { ImGui.TextDisabled("No item exceptions."); return; }
+        ImGui.TextUnformatted("Excluded:");
+        foreach (var itemId in config.ExcludedItemIds.ToArray())
+        {
+            var name = itemChoices.FirstOrDefault(x => x.ItemId == itemId)?.Name ?? $"Item {itemId}";
+            ImGui.PushID((int)itemId);
+            ImGui.TextUnformatted(name);
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Remove"))
+            {
+                config.ExcludedItemIds.Remove(itemId);
+                save();
+            }
+            ImGui.PopID();
+        }
+    }
+
+    private void RefreshMatches(string query, ref string previousQuery, ref List<ItemChoice> results)
+    {
+        if (StringComparer.CurrentCultureIgnoreCase.Equals(query, previousQuery)) return;
+        previousQuery = query;
+        results = query.Trim().Length < 2 ? [] : itemChoices
+            .Where(item => item.Name.Contains(query.Trim(), StringComparison.CurrentCultureIgnoreCase))
+            .Take(12)
+            .ToList();
     }
 
     private static void DrawAge(PriceSnapshot snapshot)

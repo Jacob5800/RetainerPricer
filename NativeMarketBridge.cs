@@ -58,6 +58,12 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     public string? LocalAvailabilityError { get; private set; }
     public string? RetainerAvailabilityError { get; private set; }
 
+    public MarketWorld? GetHomeWorld()
+    {
+        if (disposed || !player.IsLoaded || player.ContentId == 0 || player.HomeWorld.RowId == 0) return null;
+        return new MarketWorld(player.HomeWorld.RowId, player.HomeWorld.Value.Name.ToString());
+    }
+
     public NativeMarketBridge(IGameGui gameGui, IDataManager data, IPlayerState player,
         IAddonLifecycle lifecycle, IGameInteropProvider interop, ISigScanner scanner, IPluginLog log)
     {
@@ -222,18 +228,26 @@ public sealed unsafe class NativeMarketBridge : IDisposable
 
     public IReadOnlySet<ulong> OwnRetainerIds()
     {
-        var ids = new HashSet<ulong>();
-        if (!player.IsLoaded) return ids;
+        return TryGetOwnRetainerIds(out var ids) ? ids : new HashSet<ulong>();
+    }
+
+    public bool TryGetOwnRetainerIds(out IReadOnlySet<ulong> ids)
+    {
+        var loadedIds = new HashSet<ulong>();
+        ids = loadedIds;
+        if (!player.IsLoaded || player.ContentId == 0) return false;
         var manager = RetainerManager.Instance();
-        if (manager == null || !manager->IsReady) return ids;
+        if (manager == null || !manager->IsReady) return false;
         var count = manager->GetRetainerCount();
-        if (count > 10) return ids;
+        if (count > 10) return false;
         for (uint index = 0; index < count; index++)
         {
             var retainer = manager->GetRetainerBySortedIndex(index);
-            if (retainer != null && retainer->RetainerId != 0) ids.Add(retainer->RetainerId);
+            if (retainer == null || retainer->RetainerId == 0) return false;
+            loadedIds.Add(retainer->RetainerId);
         }
-        return ids;
+        ids = loadedIds;
+        return true;
     }
 
     public bool TryFillPrice(SellItem expected, uint price, out string error)

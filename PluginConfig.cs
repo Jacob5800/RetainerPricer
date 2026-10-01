@@ -9,13 +9,16 @@ public sealed class PluginConfig : IPluginConfiguration
     public bool OpenWithRetainer { get; set; } = true;
     public PriceSource Source { get; set; } = PriceSource.Universalis;
     public int MaximumAgeMinutes { get; set; } = 15;
+    public bool UseMaximumPriceAge { get; set; }
     public int MinimumPrice { get; set; } = 1;
     public bool OnlyLowerExistingPrices { get; set; } = true;
+    public List<uint> ExcludedItemIds { get; set; } = [];
 
     public void Normalize()
     {
         if (!Enum.IsDefined(Source)) Source = PriceSource.Universalis;
         MaximumAgeMinutes = Math.Clamp(MaximumAgeMinutes, 1, 120);
         MinimumPrice = Math.Clamp(MinimumPrice, 1, 999_999_999);
+        ExcludedItemIds = (ExcludedItemIds ?? []).Where(id => id != 0).Distinct().ToList();
     }
 }

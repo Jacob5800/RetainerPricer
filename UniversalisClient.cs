@@ -136,15 +136,19 @@ public sealed class UniversalisClient : IDisposable
                     throw Invalid("a listing belongs to another world.");
                 if (listing.TryGetProperty("itemID", out _) && UInt(listing, "itemID") != itemId)
                     throw Invalid("a listing belongs to another item.");
-                if (!listing.TryGetProperty("retainerID", out var retainer)) throw Invalid("missing retainer ID.");
-                ulong retainerId;
-                var validRetainer = retainer.ValueKind switch
+                // Universalis documents retainerID as optional. Keep the market response readable
+                // when it is absent; PriceCalculator blocks a quote if an unknown owner could affect it.
+                ulong retainerId = 0;
+                if (listing.TryGetProperty("retainerID", out var retainer) && retainer.ValueKind != JsonValueKind.Null)
                 {
-                    JsonValueKind.String => ulong.TryParse(retainer.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out retainerId),
-                    JsonValueKind.Number => retainer.TryGetUInt64(out retainerId),
-                    _ => SetInvalid(out retainerId),
-                };
-                if (!validRetainer || retainerId == 0) throw Invalid("invalid retainer ID; own listings cannot be excluded safely.");
+                    var validRetainer = retainer.ValueKind switch
+                    {
+                        JsonValueKind.String => ulong.TryParse(retainer.GetString(), NumberStyles.None, CultureInfo.InvariantCulture, out retainerId),
+                        JsonValueKind.Number => retainer.TryGetUInt64(out retainerId),
+                        _ => false,
+                    };
+                    if (!validRetainer || retainerId == 0) retainerId = 0;
+                }
                 results.Add(new MarketListing(itemId, Bool(listing, "hq"), price, quantity, retainerId, Bool(listing, "onMannequin")));
             }
 
@@ -164,8 +168,6 @@ public sealed class UniversalisClient : IDisposable
             throw new InvalidOperationException("Universalis returned malformed market fields. Use a local comparison.", ex);
         }
     }
-
-    private static bool SetInvalid(out ulong value) { value = 0; return false; }
 
     public void Dispose()
     {
