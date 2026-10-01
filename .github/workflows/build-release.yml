@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  release:
+    types: [published]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -72,4 +74,10 @@ jobs:
             git pull --rebase origin main
             git push origin HEAD:main
           }
-          gh release create $env:GITHUB_REF_NAME 'dist/Release/RetainerPricer/latest.zip' --title "Retainer Pricer $env:GITHUB_REF_NAME" --generate-notes
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag 'dist/Release/RetainerPricer/latest.zip' --clobber
+          } else {
+            gh release create $tag 'dist/Release/RetainerPricer/latest.zip' --title "Retainer Pricer $tag" --generate-notes
+          }

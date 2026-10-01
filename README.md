@@ -21,7 +21,7 @@ dotnet build RetainerPricer.csproj --configuration Release
 dotnet run --project checks\RetainerPricer.Checks.csproj --configuration Release
 ```
 
-The Release build places the plugin DLL at `dist\Release\RetainerPricer.dll` and its install package in `dist\Release\RetainerPricer`. GitHub Actions builds pushes and pull requests, then creates a GitHub Release and refreshes the Dalamud feed when a `vX.Y.Z` tag is pushed.
+The Release build places the plugin DLL at `dist\Release\RetainerPricer.dll` and its install package in `dist\Release\RetainerPricer`. GitHub Actions builds pushes and pull requests, then creates or updates the release package and refreshes the Dalamud feed for a published `vX.Y.Z` release or pushed tag.
 
 ## Development install
 
