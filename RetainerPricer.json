@@ -1,0 +1,15 @@
+{
+  "Author": "Jacob5800",
+  "Name": "Retainer Pricer",
+  "InternalName": "RetainerPricer",
+  "AssemblyVersion": "0.1.0.0",
+  "Description": "Automatically price new retainer listings one gil below matching competition. Review and apply changes to existing stock using Universalis or local marketboard prices.",
+  "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
+  "ApplicableVersion": "any",
+  "Tags": ["retainer", "marketboard", "prices", "universalis"],
+  "DalamudApiLevel": 15,
+  "LoadRequiredState": 0,
+  "LoadSync": false,
+  "CanUnloadAsync": true,
+  "Punchline": "Price new items and update retainer listings."
+}

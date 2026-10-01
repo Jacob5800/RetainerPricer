@@ -1,0 +1,68 @@
+using System;
+using System.Collections.Generic;
+
+namespace RetainerPricer;
+
+public static class PriceCalculator
+{
+    public const uint MaximumPrice = 999_999_999;
+
+    public static PriceProposal Calculate(
+        PriceSnapshot snapshot,
+        uint itemId,
+        uint worldId,
+        bool isHq,
+        IReadOnlySet<ulong> ownRetainerIds,
+        uint minimumPrice,
+        DateTimeOffset now,
+        TimeSpan maxAge)
+    {
+        static PriceProposal Fail(string message, uint lowest = 0, int count = 0) => new(lowest, 0, count, message);
+
+        if (snapshot is null || itemId == 0 || worldId == 0)
+            return Fail("Select an item and selling world, then fetch prices.");
+        if (snapshot.ItemId != itemId || snapshot.WorldId != worldId)
+            return Fail("These prices belong to another item or world. Fetch prices again.");
+        if (snapshot.Source is not (PriceSource.Local or PriceSource.Universalis))
+            return Fail("The price source is not recognized. Fetch prices again.");
+        if (!snapshot.IsComplete)
+            return Fail("The market results are incomplete. Refresh the full local comparison before applying.");
+        if (snapshot.Listings is null || ownRetainerIds is null)
+            return Fail("Market or retainer data is missing. Fetch prices again.");
+        if (maxAge <= TimeSpan.Zero)
+            return Fail("The maximum price age must be greater than zero.");
+        if (snapshot.ObservedAt == default || snapshot.ObservedAt > now)
+            return Fail("The market timestamp is missing or in the future. Fetch prices again.");
+        if (now - snapshot.ObservedAt > maxAge)
+            return Fail("These market prices are too old. Refresh prices before applying.");
+        if (minimumPrice > MaximumPrice)
+            return Fail("The minimum price exceeds the game's maximum asking price.");
+
+        uint lowest = uint.MaxValue;
+        var matches = 0;
+        foreach (var listing in snapshot.Listings)
+        {
+            // Reject corrupt data instead of silently hiding a possibly cheaper listing.
+            if (listing is null || listing.ItemId != itemId || listing.PricePerUnit is 0 or > MaximumPrice ||
+                listing.Quantity == 0 || listing.RetainerId == 0)
+                return Fail("A market listing is invalid or missing its retainer ID. Refresh prices before applying.");
+            if (listing.IsHq != isHq || listing.OnMannequin || ownRetainerIds.Contains(listing.RetainerId))
+                continue;
+
+            lowest = Math.Min(lowest, listing.PricePerUnit);
+            matches++;
+        }
+
+        if (matches == 0)
+            return Fail("No competing listings of the same quality were found. Enter a price manually.");
+        if (lowest == 1)
+            return Fail("The lowest competing price is already 1 gil and cannot be undercut.", lowest, matches);
+
+        var suggested = lowest - 1;
+        var floor = Math.Max(1u, minimumPrice);
+        if (suggested < floor)
+            return Fail($"Undercutting would go below your minimum of {floor:N0} gil. No price will be applied.", lowest, matches);
+
+        return new(lowest, suggested, matches, null);
+    }
+}

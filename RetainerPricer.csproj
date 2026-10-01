@@ -1,0 +1,22 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <Author>Jacob5800</Author>
+    <Name>Retainer Pricer</Name>
+    <Punchline>Price new items and update retainer listings.</Punchline>
+    <Description>Automatically fill new listing prices one gil below matching competition, and review updates for existing listings using Universalis or local market prices.</Description>
+    <RepoUrl>https://github.com/Jacob5800/RetainerPricer</RepoUrl>
+    <Tags>retainer;marketboard;prices;universalis</Tags>
+    <OutputPath>$(MSBuildProjectDirectory)\dist\$(Configuration)\</OutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="checks/**/*.cs" />
+  </ItemGroup>
+  <Target Name="PackagePlugin" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <DalamudPackager ProjectDir="$(ProjectDir)" OutputPath="$(OutputPath)" AssemblyName="$(AssemblyName)" MakeZip="true" />
+  </Target>
+</Project>
