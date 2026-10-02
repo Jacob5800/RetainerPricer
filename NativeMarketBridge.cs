@@ -476,6 +476,12 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         if (compareItem == null || !SameStock(compareItem, expected) ||
             compareItem.DialogGeneration != expected.DialogGeneration ||
             !MatchesCurrentDialog(expected, true, out _, out error)) return false;
+        // EndRequest normally captures this, but some client builds expose the completed proxy state
+        // to the framework update before the hooked callback runs. Recover from that state rather than
+        // leaving the caller waiting until its timeout.
+        var proxy = InfoProxyItemSearch.Instance();
+        if (localSnapshot == null && resultReceived && proxy != null && !proxy->WaitingForListings)
+            CaptureLocalSnapshot(proxy);
         if (localSnapshot == null)
         {
             if (requestComplete && !string.IsNullOrEmpty(localError)) error = localError;
@@ -641,46 +647,67 @@ public sealed unsafe class NativeMarketBridge : IDisposable
 
     private void OnEndRequest(InfoProxyItemSearch* proxy)
     {
-        endHook!.Original(proxy);
         try
         {
-            if (compareItem == null || proxy == null || proxy->SearchItemId != compareItem.ItemId) return;
-            if (!resultReceived || expectedListingCount is < 0 or > 100 ||
-                proxy->ListingCount != expectedListingCount || proxy->WaitingForListings ||
-                !MatchesCurrentDialog(compareItem, true, out _, out _))
-            {
-                localSnapshot = null;
-                localError = "The complete local response could not be verified. Request prices again.";
-                requestComplete = true;
-                return;
-            }
-            var rows = new List<MarketListing>(expectedListingCount);
-            for (var i = 0; i < expectedListingCount; i++)
-            {
-                ref var row = ref proxy->Listings[i];
-                if (row.ItemId != compareItem.ItemId || row.UnitPrice is 0 or > MaximumPrice ||
-                    row.Quantity == 0 || row.ListingId == 0)
-                {
-                    localSnapshot = null;
-                    localError = "A local listing was incomplete or invalid. Request prices again.";
-                    requestComplete = true;
-                    return;
-                }
-                rows.Add(new MarketListing(row.ItemId, row.IsHqItem, row.UnitPrice,
-                    row.Quantity, row.RetainerId, row.IsMannequin));
-            }
-            localSnapshot = new PriceSnapshot(compareItem.ItemId, compareItem.Session.WorldId,
-                PriceSource.Local, DateTimeOffset.UtcNow, rows, true);
-            localError = string.Empty;
-            requestComplete = true;
+            // Capture before the game's EndRequest handler gets a chance to reset its proxy state.
+            CaptureLocalSnapshot(proxy);
         }
         catch (Exception ex)
         {
-            localSnapshot = null;
-            localError = "The local response could not be verified. Request prices again.";
-            requestComplete = true;
-            log.Error(ex, "Copying complete market response failed.");
+            MarkLocalCaptureFailure(ex);
         }
+
+        // On some builds EndRequest itself clears WaitingForListings. If the pre-call capture saw
+        // that transient state, retry after the original handler has finalized the proxy.
+        endHook!.Original(proxy);
+        if (localSnapshot == null && resultReceived)
+        {
+            try { CaptureLocalSnapshot(proxy); }
+            catch (Exception ex) { MarkLocalCaptureFailure(ex); }
+        }
+    }
+
+    private void MarkLocalCaptureFailure(Exception ex)
+    {
+        localSnapshot = null;
+        localError = "The local response could not be verified. Request prices again.";
+        requestComplete = true;
+        log.Error(ex, "Copying complete market response failed.");
+    }
+
+    private void CaptureLocalSnapshot(InfoProxyItemSearch* proxy)
+    {
+        if (compareItem == null || proxy == null || proxy->SearchItemId != compareItem.ItemId) return;
+        if (!resultReceived || expectedListingCount is < 0 or > 100 ||
+            proxy->ListingCount != expectedListingCount || proxy->WaitingForListings ||
+            !MatchesCurrentDialog(compareItem, true, out _, out _))
+        {
+            localSnapshot = null;
+            localError = "The complete local response could not be verified. Request prices again.";
+            requestComplete = true;
+            return;
+        }
+
+        var rows = new List<MarketListing>(expectedListingCount);
+        for (var i = 0; i < expectedListingCount; i++)
+        {
+            ref var row = ref proxy->Listings[i];
+            if (row.ItemId != compareItem.ItemId || row.UnitPrice is 0 or > MaximumPrice ||
+                row.Quantity == 0 || row.ListingId == 0)
+            {
+                localSnapshot = null;
+                localError = "A local listing was incomplete or invalid. Request prices again.";
+                requestComplete = true;
+                return;
+            }
+            rows.Add(new MarketListing(row.ItemId, row.IsHqItem, row.UnitPrice,
+                row.Quantity, row.RetainerId, row.IsMannequin));
+        }
+
+        localSnapshot = new PriceSnapshot(compareItem.ItemId, compareItem.Session.WorldId,
+            PriceSource.Local, DateTimeOffset.UtcNow, rows, true);
+        localError = string.Empty;
+        requestComplete = true;
     }
 
     public void Dispose()

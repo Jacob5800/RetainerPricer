@@ -6,7 +6,7 @@ Run from the project directory:
 dotnet run --project checks\RetainerPricer.Checks.csproj --configuration Release
 ```
 
-On 2026-10-01, all **71 checks passed** using .NET 10. These checks use synthetic market snapshots and an injected HTTP handler; they do not access FFXIV or send network requests.
+On 2026-10-02, all **77 checks passed** using .NET 10. These checks use synthetic market snapshots and an injected HTTP handler; they do not access FFXIV or send network requests.
 
 Coverage includes unit prices across different stack sizes, exact HQ/NQ matching, own-retainer and mannequin exclusion, no competitors, the 1-gil boundary, minimum-price conflicts, maximum asking price, stale/future/missing timestamps, incomplete markets, invalid rows, missing retainer identities, API identity mismatch, truncated responses, malformed JSON/fields, rate limits, network errors, timeout, cancellation, and oversized responses.
 

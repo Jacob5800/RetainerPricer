@@ -109,11 +109,17 @@ foreach (var property in new[] { "itemID", "worldID", "lastUploadTime", "listing
     var missing = Body(); missing.Remove(property);
     await RejectFetch(() => FetchBody(missing), "Universalis", "Reject missing " + property);
 }
-foreach (var property in new[] { "pricePerUnit", "quantity", "hq", "onMannequin", "retainerID" })
+foreach (var property in new[] { "pricePerUnit", "quantity", "hq", "onMannequin" })
 {
     var missing = Body(); missing["listings"]![0]!.AsObject().Remove(property);
     await RejectFetch(() => FetchBody(missing), "Universalis", "Reject missing listing " + property);
 }
+var missingRetainerId = Body(); missingRetainerId["listings"]![0]!.AsObject().Remove("retainerID");
+var missingRetainerSnapshot = await FetchBody(missingRetainerId);
+Assert(missingRetainerSnapshot.Listings[0].RetainerId == 0,
+    "Accept the documented optional retainer ID without inventing an owner");
+Reject(Calculate(missingRetainerSnapshot),
+    "A missing retainer identity can be displayed but never used to price a listing");
 foreach (var pair in new[] { ("worldID", 63), ("itemID", 5334) })
 {
     var wrong = Body(); wrong[pair.Item1] = pair.Item2;
@@ -124,7 +130,11 @@ await RejectFetch(() => FetchBody(wrongListingWorld), "another world", "Reject c
 foreach (var id in new string?[] { "", "legacy-hash", "0", "18446744073709551616", null })
 {
     var badRetainer = Body(); badRetainer["listings"]![0]!["retainerID"] = id;
-    await RejectFetch(() => FetchBody(badRetainer), "retainer ID", "Do not silently include unknown/hashed retainer identities");
+    var badRetainerSnapshot = await FetchBody(badRetainer);
+    Assert(badRetainerSnapshot.Listings[0].RetainerId == 0,
+        "Preserve unusable retainer identities as unknown");
+    Reject(Calculate(badRetainerSnapshot),
+        "Do not price using unknown or hashed retainer identities");
 }
 var missingHistory = Body(); missingHistory["hasData"] = false;
 await RejectFetch(() => FetchBody(missingHistory), "not received", "Distinguish never-uploaded item");

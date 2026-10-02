@@ -493,6 +493,7 @@ internal sealed class PricingController : IDisposable
                 return;
             }
             step = Step.Quote;
+            Status = $"Checking the local market price for {opened.Name}{(opened.IsHq ? " (HQ)" : " (NQ)")}...";
             return;
         }
 
@@ -527,7 +528,11 @@ internal sealed class PricingController : IDisposable
         {
             if (workingItem is not { } current || listingCandidate is null)
             { Cancel("Automatic listing stopped because the active item was lost."); return; }
-            if (!ReadRequest(current, now, out var snapshot, out var requestError)) return;
+            if (!ReadRequest(current, now, out var snapshot, out var requestError))
+            {
+                Status = $"Waiting for the local marketboard price for {current.Name}{(current.IsHq ? " (HQ)" : " (NQ)")}...";
+                return;
+            }
             if (snapshot is null)
             { SkipBatchItem($"Skipped {current.Name}: {requestError}"); return; }
 
