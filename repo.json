@@ -3,7 +3,7 @@
     "Author": "Jacob5800",
     "Name": "Retainer Pricer",
     "InternalName": "RetainerPricer",
-    "AssemblyVersion": "0.1.8.0",
+    "AssemblyVersion": "0.1.9.0",
     "TestingAssemblyVersion": null,
     "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
     "ApplicableVersion": "any",
@@ -14,6 +14,6 @@
     "IsTestingExclusive": false,
     "DownloadLinkInstall": "https://github.com/Jacob5800/RetainerPricer/releases/latest/download/latest.zip",
     "DownloadLinkUpdate": "https://github.com/Jacob5800/RetainerPricer/releases/latest/download/latest.zip",
-    "LastUpdate": "1790958541"
+    "LastUpdate": "1790964909"
   }
 ]
