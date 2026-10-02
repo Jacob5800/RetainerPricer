@@ -37,12 +37,20 @@ internal sealed class MainWindow : Window
     {
         ImGui.TextWrapped("One gil below the lowest matching listing on your home world. HQ and NQ are compared separately; your own retainers are excluded.");
         if (retainerError() is { } nativeError) ImGui.TextWrapped(nativeError);
+        var busy = controller.Busy;
+        ImGui.BeginDisabled(busy);
         if (ImGui.Button("Start listing items")) dispatch(controller.StartListingItems);
         ImGui.SameLine();
         if (ImGui.Button("Update existing listings")) dispatch(controller.UpdateExistingListings);
+        ImGui.EndDisabled();
+        if (busy)
+        {
+            ImGui.SameLine();
+            if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
+        }
         ImGui.TextDisabled("Start listing items prices eligible carried inventory. Update existing listings reprices current stock. Both use fresh local marketboard data and skip exclusions.");
         if (controller.Busy)
-            ImGui.TextDisabled("A pricing task is already running. Stop it before starting another.");
+            ImGui.TextDisabled("A pricing task is running. Stop it here before starting another.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
         ImGui.BeginDisabled(controller.Busy);
         var automatic = config.AutoPriceNewListings;
@@ -68,7 +76,6 @@ internal sealed class MainWindow : Window
         if (controller.Busy)
         {
             if (!string.IsNullOrEmpty(controller.Progress)) ImGui.TextUnformatted(controller.Progress);
-            if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
         }
         if (ImGui.BeginTabBar("##pricingTabs"))
         {
