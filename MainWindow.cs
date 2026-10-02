@@ -109,18 +109,19 @@ internal sealed class MainWindow : Window
     {
         ImGui.TextWrapped("Keep the current retainer's selling list open. Check prices, review the changes below, then apply the selected rows.");
         if (controller.ExistingUpdateError is { } updateError) ImGui.TextWrapped(updateError);
+        if (controller.ExistingApplyError is { } applyError) ImGui.TextWrapped(applyError);
         ImGui.BeginDisabled(controller.Busy || !controller.CanUpdateExisting);
         if (ImGui.Button("Update existing listings")) dispatch(controller.ScanExisting);
         if (controller.Rows.Count > 0)
         {
             ImGui.SameLine();
-            ImGui.BeginDisabled(!controller.CanUpdateExisting);
+            ImGui.BeginDisabled(controller.Busy || !controller.CanApplyExisting);
             if (ImGui.Button("Apply selected updates")) dispatch(controller.ApplyReviewed);
             ImGui.EndDisabled();
         }
         ImGui.EndDisabled();
         if (controller.Rows.Count == 0) return;
-        if (ImGui.BeginTable("##existingPrices", 8, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY
+        if (ImGui.BeginTable("##existingPrices", 9, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY
             | ImGuiTableFlags.Resizable, new Vector2(0, Math.Max(150, ImGui.GetContentRegionAvail().Y - 30))))
         {
             ImGui.TableSetupColumn("Use", ImGuiTableColumnFlags.WidthFixed, 34);
@@ -131,6 +132,7 @@ internal sealed class MainWindow : Window
             ImGui.TableSetupColumn("Source", ImGuiTableColumnFlags.WidthFixed, 90);
             ImGui.TableSetupColumn("Age", ImGuiTableColumnFlags.WidthFixed, 55);
             ImGui.TableSetupColumn("Result");
+            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 64);
             ImGui.TableSetupScrollFreeze(0, 1);
             ImGui.TableHeadersRow();
             foreach (var row in controller.Rows)
@@ -149,6 +151,10 @@ internal sealed class MainWindow : Window
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Snapshot?.Source.ToString() ?? "—");
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Snapshot is { } data ? Age(data.ObservedAt) : "—");
                 ImGui.TableNextColumn(); ImGui.TextWrapped(row.Status);
+                ImGui.TableNextColumn();
+                ImGui.BeginDisabled(controller.Busy || config.ExcludedItemIds.Contains(row.Item.ItemId));
+                if (ImGui.SmallButton("Exclude")) AddExclusion(row.Item.ItemId);
+                ImGui.EndDisabled();
                 ImGui.PopID();
             }
             ImGui.EndTable();
@@ -211,40 +217,147 @@ internal sealed class MainWindow : Window
         else if (lookupSearch.Trim().Length >= 2)
             ImGui.TextDisabled("No item names match that search.");
 
-        if (lookupSelection is not { } selected) return;
-        ImGui.TextUnformatted($"Selected: {selected.Name} · item {selected.ItemId}");
-        var hq = lookupHq;
-        ImGui.BeginDisabled(controller.Busy);
-        if (ImGui.Checkbox("High Quality", ref hq)) lookupHq = hq;
-        ImGui.EndDisabled();
-        var world = homeWorld();
-        ImGui.TextUnformatted(world is null ? "Waiting for character home-world data." : $"World: {world.Name}");
-        ImGui.BeginDisabled(controller.Busy || world is null);
-        if (ImGui.Button("Retrieve price") && world is not null)
-            dispatch(() => controller.CheckManualItem(selected, lookupHq, world));
-        ImGui.EndDisabled();
-        if (controller.ManualQuoteWarning is { } warning) ImGui.TextWrapped(warning);
-        if (controller.ManualSnapshot is { } snapshot)
+        if (lookupSelection is { } selected)
         {
-            DrawAge(snapshot);
-            var comparable = snapshot.Listings.Where(listing => listing.IsHq == lookupHq && !listing.OnMannequin).ToArray();
-            if (comparable.Length > 0)
-                ImGui.TextUnformatted($"Lowest retrieved matching listing: {comparable.Min(listing => listing.PricePerUnit):N0} gil each");
-            else
-                ImGui.TextUnformatted("No matching HQ/NQ listings were included in this response.");
-            ImGui.TextUnformatted($"Received {snapshot.Listings.Count:N0} listings on {world?.Name ?? "the home world"}.");
-            if (controller.ManualProposal is { } proposal)
+            ImGui.TextUnformatted($"Selected: {selected.Name} · item {selected.ItemId}");
+            var hq = lookupHq;
+            ImGui.BeginDisabled(controller.Busy);
+            if (ImGui.Checkbox("High Quality", ref hq)) lookupHq = hq;
+            ImGui.EndDisabled();
+            var world = homeWorld();
+            ImGui.TextUnformatted(world is null ? "Waiting for character home-world data." : $"World: {world.Name}");
+            ImGui.BeginDisabled(controller.Busy || world is null);
+            if (ImGui.Button("Retrieve price") && world is not null)
+                dispatch(() => controller.CheckManualItem(selected, lookupHq, world));
+            ImGui.EndDisabled();
+            if (controller.ManualQuoteWarning is { } warning) ImGui.TextWrapped(warning);
+            if (controller.ManualSnapshot is { } snapshot)
             {
-                if (proposal.CanApply)
+                DrawAge(snapshot);
+                var comparable = snapshot.Listings.Where(listing => listing.IsHq == lookupHq && !listing.OnMannequin).ToArray();
+                if (comparable.Length > 0)
+                    ImGui.TextUnformatted($"Lowest retrieved matching listing: {comparable.Min(listing => listing.PricePerUnit):N0} gil each");
+                else
+                    ImGui.TextUnformatted("No matching HQ/NQ listings were included in this response.");
+                ImGui.TextUnformatted($"Received {snapshot.Listings.Count:N0} listings on {world?.Name ?? "the home world"}.");
+                if (controller.ManualProposal is { } proposal)
                 {
-                    if (controller.ManualQuoteWarning is null)
-                        ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.6f, 1), $"Suggested undercut: {proposal.SuggestedPrice:N0} gil each");
+                    if (proposal.CanApply)
+                    {
+                        if (controller.ManualQuoteWarning is null)
+                            ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.6f, 1), $"Suggested undercut: {proposal.SuggestedPrice:N0} gil each");
+                        else
+                            ImGui.TextUnformatted($"Reference undercut: {proposal.SuggestedPrice:N0} gil each");
+                    }
                     else
-                        ImGui.TextUnformatted($"Reference undercut: {proposal.SuggestedPrice:N0} gil each");
+                        ImGui.TextWrapped(proposal.Error ?? "No usable price.");
                 }
-                else ImGui.TextWrapped(proposal.Error ?? "No usable price.");
             }
         }
+        DrawCapturedItems();
+    }
+
+    private void DrawCapturedItems()
+    {
+        ImGui.Separator();
+        ImGui.TextUnformatted("Captured items");
+        ImGui.TextWrapped("Snapshot your carried inventory or the current retainer's listings. Untradeable and nonmarketable items, plus your saved exclusions, are skipped automatically.");
+        ImGui.BeginDisabled(controller.Busy);
+        if (ImGui.Button("Snapshot inventory")) dispatch(controller.SnapshotInventory);
+        ImGui.SameLine();
+        if (ImGui.Button("Snapshot retainer listings")) dispatch(controller.SnapshotListedItems);
+        ImGui.SameLine();
+        if (ImGui.Button("Start listing items")) dispatch(controller.StartListingItems);
+        ImGui.EndDisabled();
+
+        if (controller.InventorySnapshotError is { } inventoryError) ImGui.TextWrapped(inventoryError);
+        else if (controller.InventorySnapshotAt is { } inventoryAt)
+        {
+            ImGui.TextUnformatted($"Inventory snapshot · {controller.InventoryCandidates.Count} stack(s) · {inventoryAt:HH:mm:ss}");
+            ImGui.TextDisabled($"Skipped {controller.InventoryExceptionSkipped} excluded stack(s) and {controller.InventoryUnmarketableSkipped} untradeable or nonmarketable stack(s).");
+            DrawInventoryCandidates();
+        }
+
+        if (controller.ListedSnapshotError is { } listedError) ImGui.TextWrapped(listedError);
+        else if (controller.ListedSnapshotAt is { } listedAt)
+        {
+            ImGui.TextUnformatted($"Retainer listing snapshot · {controller.ListedCandidates.Count} item(s) · {listedAt:HH:mm:ss}");
+            ImGui.TextDisabled($"Skipped {controller.ListedExceptionSkipped} excluded listing(s) and {controller.ListedUnmarketableSkipped} unmarketable listing(s).");
+            DrawListedCandidates();
+        }
+    }
+
+    private void DrawInventoryCandidates()
+    {
+        if (controller.InventoryCandidates.Count == 0) { ImGui.TextDisabled("No eligible inventory stacks to list or price."); return; }
+        if (!ImGui.BeginTable("##inventorySnapshot", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable, new Vector2(0, 190))) return;
+        ImGui.TableSetupColumn("Item");
+        ImGui.TableSetupColumn("Qty", ImGuiTableColumnFlags.WidthFixed, 48);
+        ImGui.TableSetupColumn("Price", ImGuiTableColumnFlags.WidthFixed, 62);
+        ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed, 150);
+        ImGui.TableSetupScrollFreeze(0, 1);
+        ImGui.TableHeadersRow();
+        var world = homeWorld();
+        foreach (var item in controller.InventoryCandidates.ToArray())
+        {
+            ImGui.PushID(HashCode.Combine(item.ItemId, item.InventoryType, item.Slot));
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn(); ImGui.TextWrapped($"{item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")}");
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(item.Quantity.ToString("N0"));
+            ImGui.TableNextColumn();
+            ImGui.BeginDisabled(controller.Busy || world is null);
+            if (ImGui.SmallButton("Retrieve")) dispatch(() => controller.CheckManualItem(new ItemChoice(item.ItemId, item.Name), item.IsHq, world!));
+            ImGui.EndDisabled();
+            ImGui.TableNextColumn();
+            ImGui.BeginDisabled(controller.Busy);
+            if (ImGui.SmallButton("List")) dispatch(() => controller.OpenInventoryItem(item));
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Exclude")) AddExclusion(item.ItemId);
+            ImGui.EndDisabled();
+            ImGui.PopID();
+        }
+        ImGui.EndTable();
+    }
+
+    private void DrawListedCandidates()
+    {
+        if (controller.ListedCandidates.Count == 0) { ImGui.TextDisabled("No eligible listings on this retainer."); return; }
+        if (!ImGui.BeginTable("##retainerSnapshot", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable, new Vector2(0, 160))) return;
+        ImGui.TableSetupColumn("Item");
+        ImGui.TableSetupColumn("Qty", ImGuiTableColumnFlags.WidthFixed, 48);
+        ImGui.TableSetupColumn("Current", ImGuiTableColumnFlags.WidthFixed, 72);
+        ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed, 150);
+        ImGui.TableSetupScrollFreeze(0, 1);
+        ImGui.TableHeadersRow();
+        var world = homeWorld();
+        foreach (var item in controller.ListedCandidates.ToArray())
+        {
+            ImGui.PushID(HashCode.Combine(item.ItemId, item.Slot));
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn(); ImGui.TextWrapped($"{item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")}");
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(item.Quantity.ToString("N0"));
+            ImGui.TableNextColumn(); ImGui.TextUnformatted(item.CurrentPrice.ToString("N0"));
+            ImGui.TableNextColumn();
+            ImGui.BeginDisabled(controller.Busy || world is null);
+            if (ImGui.SmallButton("Retrieve")) dispatch(() => controller.CheckManualItem(new ItemChoice(item.ItemId, item.Name), item.IsHq, world!));
+            ImGui.EndDisabled();
+            ImGui.SameLine();
+            ImGui.BeginDisabled(controller.Busy);
+            if (ImGui.SmallButton("Exclude")) AddExclusion(item.ItemId);
+            ImGui.EndDisabled();
+            ImGui.PopID();
+        }
+        ImGui.EndTable();
+    }
+
+    private void AddExclusion(uint itemId)
+    {
+        if (!config.ExcludedItemIds.Contains(itemId)) config.ExcludedItemIds.Add(itemId);
+        config.Normalize();
+        controller.ExcludeItem(itemId);
+        save();
     }
 
     private void DrawExceptions()

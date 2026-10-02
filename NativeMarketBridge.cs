@@ -57,6 +57,7 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     public long DialogGeneration { get; private set; } = 1;
     public string? LocalAvailabilityError { get; private set; }
     public string? RetainerAvailabilityError { get; private set; }
+    public string? ItemSelectorAvailabilityError { get; private set; }
 
     public MarketWorld? GetHomeWorld()
     {
@@ -79,25 +80,32 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         {
             try
             {
-                // This is the call-site signature attached to AgentRetainer.OpenRetainerSell in FFXIVClientStructs.
-                // The official helper resolves its relative E8 target; verify the one match and opcode before binding.
+                // FFXIVClientStructs' AgentRetainer.OpenRetainerSell call-site signature. Multiple call sites
+                // are acceptable only when every one resolves to the same target inside the game text section.
                 const string openSellCall = "E8 ?? ?? ?? ?? EB ?? 48 83 BF ?? ?? ?? ?? ?? 74 ?? 8B CE";
                 var matches = scanner.ScanAllText(openSellCall);
-                if (matches.Length == 1 && *(byte*)matches[0] == 0xE8)
+                nint? resolvedTarget = null;
+                var allTargetsVerified = matches.Length > 0;
+                foreach (var match in matches)
                 {
-                    var relativeOffset = *(int*)(matches[0] + 1);
-                    var target = scanner.ResolveRelativeAddress(matches[0] + 5, relativeOffset);
+                    if (*(byte*)match != 0xE8) { allTargetsVerified = false; break; }
+                    var relativeOffset = *(int*)(match + 1);
+                    var target = scanner.ResolveRelativeAddress(match + 5, relativeOffset);
                     var textStart = scanner.TextSectionBase;
-                    if (target >= textStart && target < textStart + scanner.TextSectionSize)
-                        openRetainerSell = Marshal.GetDelegateForFunctionPointer<OpenRetainerSellDelegate>(target);
+                    if (target < textStart || target >= textStart + scanner.TextSectionSize ||
+                        resolvedTarget is { } previous && previous != target)
+                    { allTargetsVerified = false; break; }
+                    resolvedTarget ??= target;
                 }
+                if (allTargetsVerified && resolvedTarget is { } verifiedTarget)
+                    openRetainerSell = Marshal.GetDelegateForFunctionPointer<OpenRetainerSellDelegate>(verifiedTarget);
             }
             catch (Exception ex) { log.Warning(ex, "Retainer stock-opening callback is not available on this game build."); }
         }
         if (!retainerFieldsSupported)
             RetainerAvailabilityError = "This FFXIV client layout differs from its verified retainer fields. Reload a matching Dalamud SDK before pricing listings.";
         else if (openRetainerSell is null)
-            RetainerAvailabilityError = "This game build's retainer item selector could not be verified. Batch updates are disabled.";
+            ItemSelectorAvailabilityError = "The game's retainer item selector could not be verified. Price scanning is available, but automatic applying is disabled on this client build.";
         try
         {
             // EndRequest is the documented all-pages-complete callback. ProcessRequestResult supplies
@@ -226,6 +234,45 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         return result;
     }
 
+    public IReadOnlyList<CarriedItemCandidate> ReadCarriedInventory(IReadOnlySet<uint> marketableItemIds,
+        IReadOnlySet<uint> excludedItemIds, out int exceptionSkipped, out int unmarketableSkipped, out string error)
+    {
+        var result = new List<CarriedItemCandidate>();
+        exceptionSkipped = 0;
+        unmarketableSkipped = 0;
+        error = "Log in before taking an inventory snapshot.";
+        if (disposed || !player.IsLoaded || player.ContentId == 0) return result;
+        var inventory = InventoryManager.Instance();
+        if (inventory == null) { error = "The character inventory is not available yet."; return result; }
+
+        InventoryType[] carriedContainers = [InventoryType.Inventory1, InventoryType.Inventory2,
+            InventoryType.Inventory3, InventoryType.Inventory4];
+        foreach (var type in carriedContainers)
+        {
+            var container = inventory->GetInventoryContainer(type);
+            if (container == null || !container->IsLoaded)
+            {
+                error = "The carried inventory is still loading. Try the snapshot again in a moment.";
+                return [];
+            }
+            for (var slot = 0; slot < container->Size; slot++)
+            {
+                var stock = container->GetInventorySlot(slot);
+                if (stock == null || stock->IsEmpty() || stock->GetQuantity() == 0) continue;
+                var itemId = stock->GetBaseItemId();
+                if (itemId == 0) continue;
+                if (!marketableItemIds.Contains(itemId)) { unmarketableSkipped++; continue; }
+                if (excludedItemIds.Contains(itemId)) { exceptionSkipped++; continue; }
+                var name = ItemName(itemId);
+                if (string.IsNullOrWhiteSpace(name)) { unmarketableSkipped++; continue; }
+                result.Add(new CarriedItemCandidate(itemId, name, stock->IsHighQuality(),
+                    stock->GetQuantity(), (int)type, slot));
+            }
+        }
+        error = string.Empty;
+        return result;
+    }
+
     public IReadOnlySet<ulong> OwnRetainerIds()
     {
         return TryGetOwnRetainerIds(out var ids) ? ids : new HashSet<ulong>();
@@ -296,13 +343,54 @@ public sealed unsafe class NativeMarketBridge : IDisposable
             error = "This listing's price changed. Review it again.";
             return false;
         }
-        if (openRetainerSell is null) { error = "This FFXIV client build does not expose its verified retainer item selector."; return false; }
         var agent = AgentRetainer.Instance();
         if (RetainerAgentView.For(agent) == null || !agent->IsAgentActive())
         { error = "The active retainer changed. Reopen its sale list and retry."; return false; }
-        openRetainerSell(agent, InventoryType.RetainerMarket, checked((ushort)expected.Slot));
-        error = string.Empty;
-        return true;
+        return OpenRetainerSell(agent, InventoryType.RetainerMarket, checked((ushort)expected.Slot), out error);
+    }
+
+    public bool TryOpenInventoryItem(CarriedItemCandidate expected, out string error)
+    {
+        if (!TryGetSession(out _, out error)) return false;
+        if (GetSellAddon() != null || IsAddonReady("ItemSearchResult"))
+        {
+            error = "Close the current price or comparison window before opening another item.";
+            return false;
+        }
+        var type = (InventoryType)expected.InventoryType;
+        if (type is not (InventoryType.Inventory1 or InventoryType.Inventory2 or InventoryType.Inventory3 or InventoryType.Inventory4) ||
+            !TryGetStock(type, expected.Slot, out var stock, out error)) return false;
+        if (stock->GetBaseItemId() != expected.ItemId || stock->IsHighQuality() != expected.IsHq ||
+            stock->GetQuantity() != expected.Quantity)
+        {
+            error = "That inventory slot changed after the snapshot. Take a fresh snapshot before opening it.";
+            return false;
+        }
+        var agent = AgentRetainer.Instance();
+        if (RetainerAgentView.For(agent) == null || !agent->IsAgentActive())
+        { error = "The active retainer changed. Reopen its sale list and retry."; return false; }
+        return OpenRetainerSell(agent, type, checked((ushort)expected.Slot), out error);
+    }
+
+    private bool OpenRetainerSell(AgentRetainer* agent, InventoryType inventoryType, ushort slot, out string error)
+    {
+        if (openRetainerSell is null)
+        {
+            error = ItemSelectorAvailabilityError ?? "The game's retainer item selector is unavailable.";
+            return false;
+        }
+        try
+        {
+            openRetainerSell(agent, inventoryType, slot);
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = "The retainer item selector failed on this client build. No listing was changed.";
+            log.Warning(ex, "Opening a retainer listing item failed.");
+            return false;
+        }
     }
 
     public bool TrySetExistingPrice(SellItem expected, uint price, out string error)

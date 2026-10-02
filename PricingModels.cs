@@ -6,6 +6,7 @@ namespace RetainerPricer;
 public enum PriceSource { Universalis, Local }
 
 public sealed record ItemChoice(uint ItemId, string Name);
+public sealed record CarriedItemCandidate(uint ItemId, string Name, bool IsHq, uint Quantity, int InventoryType, int Slot);
 public sealed record MarketWorld(uint WorldId, string Name);
 
 public sealed record MarketListing(

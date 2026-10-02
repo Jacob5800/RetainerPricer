@@ -16,6 +16,7 @@ internal sealed class PricingController : IDisposable
     private readonly NativeMarketBridge bridge;
     private readonly UniversalisClient universalis;
     private readonly PluginConfig config;
+    private readonly IReadOnlySet<uint> marketableItemIds;
     private CancellationTokenSource cancellation = new();
     private readonly Dictionary<(uint World, uint Item), PriceSnapshot> cache = [];
     private Task<PriceSnapshot>? quoteTask;
@@ -36,8 +37,10 @@ internal sealed class PricingController : IDisposable
 
     private sealed record ManualQuoteTarget(ItemChoice Item, bool IsHq, MarketWorld World);
 
-    public PricingController(NativeMarketBridge bridge, UniversalisClient universalis, PluginConfig config)
-        => (this.bridge, this.universalis, this.config) = (bridge, universalis, config);
+    public PricingController(NativeMarketBridge bridge, UniversalisClient universalis, PluginConfig config,
+        IReadOnlySet<uint> marketableItemIds)
+        => (this.bridge, this.universalis, this.config, this.marketableItemIds) =
+            (bridge, universalis, config, marketableItemIds);
 
     public SellItem? CurrentItem { get; private set; }
     public PriceSnapshot? CurrentSnapshot { get; private set; }
@@ -45,10 +48,22 @@ internal sealed class PricingController : IDisposable
     public PriceSnapshot? ManualSnapshot { get; private set; }
     public PriceProposal? ManualProposal { get; private set; }
     public string? ManualQuoteWarning { get; private set; }
+    public List<CarriedItemCandidate> InventoryCandidates { get; } = [];
+    public List<SellItem> ListedCandidates { get; } = [];
+    public DateTimeOffset? InventorySnapshotAt { get; private set; }
+    public DateTimeOffset? ListedSnapshotAt { get; private set; }
+    public int InventoryExceptionSkipped { get; private set; }
+    public int InventoryUnmarketableSkipped { get; private set; }
+    public int ListedExceptionSkipped { get; private set; }
+    public int ListedUnmarketableSkipped { get; private set; }
+    public string? InventorySnapshotError { get; private set; }
+    public string? ListedSnapshotError { get; private set; }
     public List<PriceRow> Rows { get; } = [];
     public bool Busy => work != Work.Idle;
     public bool CanUpdateExisting => bridge.RetainerAvailabilityError is null;
+    public bool CanApplyExisting => CanUpdateExisting && bridge.ItemSelectorAvailabilityError is null;
     public string? ExistingUpdateError => bridge.RetainerAvailabilityError;
+    public string? ExistingApplyError => bridge.ItemSelectorAvailabilityError;
     public bool HasRetainer => bridge.TryGetSession(out _, out _);
     public string Status { get; private set; } = "Open a retainer's selling list to begin.";
     public string Progress => work is Work.Scan ? $"Checking {Math.Min(index + 1, Rows.Count)} of {Rows.Count}"
@@ -73,7 +88,8 @@ internal sealed class PricingController : IDisposable
                 seenDialog = item.DialogGeneration;
                 CurrentSnapshot = null;
                 CurrentProposal = null;
-                if (config.AutoPriceNewListings && !item.IsExisting && !IsExcluded(item.ItemId)) CheckCurrent(true);
+                if (config.AutoPriceNewListings && !item.IsExisting && marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId))
+                    CheckCurrent(true);
             }
             return;
         }
@@ -97,10 +113,78 @@ internal sealed class PricingController : IDisposable
         Status = $"Retrieving {item.Name}{(isHq ? " (HQ)" : " (NQ)")} on {world.Name} from Universalis...";
     }
 
+    public void SnapshotInventory()
+    {
+        var items = bridge.ReadCarriedInventory(marketableItemIds, config.ExcludedItemIds.ToHashSet(),
+            out var exceptionSkipped, out var unmarketableSkipped, out var error);
+        InventoryCandidates.Clear();
+        InventoryCandidates.AddRange(items);
+        InventoryExceptionSkipped = exceptionSkipped;
+        InventoryUnmarketableSkipped = unmarketableSkipped;
+        InventorySnapshotError = error.Length == 0 ? null : error;
+        InventorySnapshotAt = error.Length == 0 ? DateTimeOffset.Now : null;
+        Status = error.Length != 0 ? error :
+            $"Inventory snapshot ready: {items.Count} marketable stack(s), {exceptionSkipped} excluded, {unmarketableSkipped} not marketable.";
+    }
+
+    public void SnapshotListedItems()
+    {
+        if (!bridge.TryGetSession(out _, out var sessionError))
+        {
+            ListedCandidates.Clear();
+            ListedSnapshotAt = null;
+            ListedSnapshotError = sessionError;
+            Status = sessionError;
+            return;
+        }
+        var items = bridge.ReadExistingListings(out var error);
+        ListedCandidates.Clear();
+        ListedExceptionSkipped = items.Count(item => config.ExcludedItemIds.Contains(item.ItemId));
+        ListedUnmarketableSkipped = items.Count(item => !marketableItemIds.Contains(item.ItemId));
+        if (error.Length == 0)
+            ListedCandidates.AddRange(items.Where(item => marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId)));
+        ListedSnapshotError = error.Length == 0 ? null : error;
+        ListedSnapshotAt = error.Length == 0 ? DateTimeOffset.Now : null;
+        Status = error.Length != 0 ? error :
+            $"Retainer listing snapshot ready: {ListedCandidates.Count} marketable item(s), {ListedExceptionSkipped} excluded, {ListedUnmarketableSkipped} not marketable.";
+    }
+
+    public void StartListingItems()
+    {
+        SnapshotInventory();
+        if (InventorySnapshotError is { } snapshotError) { Status = snapshotError; return; }
+        if (InventoryCandidates.Count == 0) { Status = "No eligible items in carried inventory. Excluded and unmarketable items are skipped."; return; }
+        var candidate = InventoryCandidates[0];
+        if (!bridge.TryOpenInventoryItem(candidate, out var error)) { Status = error; return; }
+        Status = $"Opened {candidate.Name}{(candidate.IsHq ? " (HQ)" : " (NQ)")}. The price fills automatically when enabled; confirm it in game. After it closes, click Start listing items again for the next eligible stack.";
+    }
+
+    public bool OpenInventoryItem(CarriedItemCandidate item)
+    {
+        if (Busy) return false;
+        if (!bridge.TryOpenInventoryItem(item, out var error)) { Status = error; return false; }
+        Status = $"Opened {item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")} for listing. Confirm the sale in game.";
+        return true;
+    }
+
+    public void ExcludeItem(uint itemId)
+    {
+        InventoryCandidates.RemoveAll(item => item.ItemId == itemId);
+        ListedCandidates.RemoveAll(item => item.ItemId == itemId);
+        foreach (var row in Rows.Where(row => row.Item.ItemId == itemId))
+        {
+            row.Selected = false;
+            row.Status = "Excluded";
+        }
+    }
+
     public void CheckCurrent(bool fillAutomatically = false)
     {
         if (Busy) return;
         if (!bridge.TryReadSellItem(out var target, out var error)) { Status = error; return; }
+        if (!marketableItemIds.Contains(target.ItemId))
+        { Status = "This item is not marketable and will be skipped."; return; }
+        if (IsExcluded(target.ItemId)) { Status = $"{target.Name} is in the item exception list and will be skipped."; return; }
         workingItem = target;
         session = target.Session;
         CurrentItem = target;
@@ -128,13 +212,15 @@ internal sealed class PricingController : IDisposable
     {
         if (Busy) return;
         if (!CanUpdateExisting) { Status = ExistingUpdateError!; return; }
+        Rows.Clear();
         if (bridge.TryReadSellItem(out _, out _)) { Status = "Close the individual selling window first, leaving the retainer's selling list open."; return; }
         if (!bridge.TryGetSession(out var active, out var error)) { Status = error; return; }
         var items = bridge.ReadExistingListings(out error);
         if (items.Count == 0) { Status = string.IsNullOrEmpty(error) ? "This retainer has no listings." : error; return; }
-        items = items.Where(item => !IsExcluded(item.ItemId)).ToList();
-        if (items.Count == 0) { Status = "Every listing on this retainer is in the item exception list."; return; }
-        Rows.Clear();
+        var unmarketable = items.Count(item => !marketableItemIds.Contains(item.ItemId));
+        var excluded = items.Count(item => IsExcluded(item.ItemId));
+        items = items.Where(item => marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId)).ToList();
+        if (items.Count == 0) { Status = "All current listings are excluded or are not marketable."; return; }
         Rows.AddRange(items.Select(x => new PriceRow(x)));
         session = active;
         work = Work.Scan;
@@ -142,13 +228,14 @@ internal sealed class PricingController : IDisposable
         step = Step.Start;
         cache.Clear();
         workSource = config.Source;
-        Status = "Checking existing listings. Review the suggested prices before applying.";
+        Status = $"Checking {items.Count} existing listing(s) ({excluded} excluded, {unmarketable} not marketable). Review the suggested prices before applying.";
     }
 
     public void ApplyReviewed()
     {
         if (Busy) return;
         if (!CanUpdateExisting) { Status = ExistingUpdateError!; return; }
+        if (!CanApplyExisting) { Status = ExistingApplyError ?? "The game item selector is unavailable."; return; }
         if (bridge.TryReadSellItem(out _, out _)) { Status = "Close the individual selling window before updating the reviewed listings."; return; }
         applying = Rows.Where(x => x.Selected && !IsExcluded(x.Item.ItemId) && x.Proposal is { CanApply: true }
             && x.Proposal.SuggestedPrice != x.Item.CurrentPrice
