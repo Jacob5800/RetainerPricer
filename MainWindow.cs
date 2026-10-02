@@ -39,18 +39,38 @@ internal sealed class MainWindow : Window
         if (retainerError() is { } nativeError) ImGui.TextWrapped(nativeError);
         var busy = controller.Busy;
         ImGui.BeginDisabled(busy);
-        if (ImGui.Button("Start listing items")) dispatch(controller.StartListingItems);
+        if (controller.IsListingItemsRunning)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.12f, 0.48f, 0.2f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.16f, 0.58f, 0.25f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.09f, 0.4f, 0.16f, 1));
+            ImGui.Button("Listing items...");
+            ImGui.PopStyleColor(3);
+        }
+        else if (ImGui.Button("Start listing items")) dispatch(controller.StartListingItems);
         ImGui.SameLine();
-        if (ImGui.Button("Update existing listings")) dispatch(controller.UpdateExistingListings);
+        if (controller.IsUpdatingListings)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.12f, 0.48f, 0.2f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.16f, 0.58f, 0.25f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.09f, 0.4f, 0.16f, 1));
+            ImGui.Button("Updating listings...");
+            ImGui.PopStyleColor(3);
+        }
+        else if (ImGui.Button("Update existing listings")) dispatch(controller.UpdateExistingListings);
         ImGui.EndDisabled();
         if (busy)
         {
             ImGui.SameLine();
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.68f, 0.12f, 0.12f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.82f, 0.18f, 0.18f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.55f, 0.08f, 0.08f, 1));
             if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
+            ImGui.PopStyleColor(3);
         }
         ImGui.TextDisabled("Start listing items prices eligible carried inventory. Update existing listings reprices current stock. Both use fresh local marketboard data and skip exclusions.");
         if (controller.Busy)
-            ImGui.TextDisabled("A pricing task is running. Stop it here before starting another.");
+            ImGui.TextDisabled("The active listing task is highlighted. Stop cancels it; changes already submitted remain applied.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
         ImGui.BeginDisabled(controller.Busy);
         var automatic = config.AutoPriceNewListings;

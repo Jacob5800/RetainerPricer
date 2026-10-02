@@ -64,6 +64,8 @@ internal sealed class PricingController : IDisposable
     public string? ListedSnapshotError { get; private set; }
     public List<PriceRow> Rows { get; } = [];
     public bool Busy => work != Work.Idle;
+    public bool IsListingItemsRunning => work == Work.BatchListing;
+    public bool IsUpdatingListings => work == Work.Scan;
     public bool CanUpdateExisting => bridge.RetainerAvailabilityError is null;
     public bool CanApplyExisting => CanUpdateExisting && bridge.ItemSelectorAvailabilityError is null;
     public bool CanStartListingItems => CanApplyExisting && bridge.LocalAvailabilityError is null;
