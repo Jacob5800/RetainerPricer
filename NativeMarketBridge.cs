@@ -407,6 +407,20 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         return ClickRegisteredButton(addon->Confirm, (AtkUnitBase*)addon, out error);
     }
 
+    public bool TryConfirmNewListing(SellItem expected, uint price, out string error)
+    {
+        if (expected.IsExisting || expected.DialogGeneration == 0)
+        {
+            error = "Open a new inventory item for sale before confirming a listing.";
+            return false;
+        }
+        if (!TryFillPrice(expected, price, out error)) return false;
+        if (!MatchesCurrentDialog(expected with { CurrentPrice = price }, true, out _, out error)) return false;
+        var addon = GetSellAddon();
+        if (addon == null) { error = "The sell window closed before the listing could be confirmed."; return false; }
+        return ClickRegisteredButton(addon->Confirm, (AtkUnitBase*)addon, out error);
+    }
+
     public bool TryReadExistingPrice(SellItem expected, out uint price, out string error)
     {
         price = 0;

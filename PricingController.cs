@@ -11,7 +11,7 @@ internal sealed class PriceRow(SellItem item)
 
 internal sealed class PricingController : IDisposable
 {
-    private enum Work { Idle, Single, Manual, Scan, Apply }
+    private enum Work { Idle, Single, Manual, Scan, Apply, BatchListing }
     private enum Step { Start, Opening, Quote, Closing, Confirming }
     private readonly NativeMarketBridge bridge;
     private readonly UniversalisClient universalis;
@@ -34,6 +34,12 @@ internal sealed class PricingController : IDisposable
     private PriceSource workSource;
     private uint submittedPrice;
     private List<PriceRow> applying = [];
+    private List<CarriedItemCandidate> batchCandidates = [];
+    private HashSet<int> preListingSlots = [];
+    private CarriedItemCandidate? listingCandidate;
+    private uint listingSubmittedPrice;
+    private int listingSucceeded;
+    private int listingSkipped;
 
     private sealed record ManualQuoteTarget(ItemChoice Item, bool IsHq, MarketWorld World);
 
@@ -62,11 +68,14 @@ internal sealed class PricingController : IDisposable
     public bool Busy => work != Work.Idle;
     public bool CanUpdateExisting => bridge.RetainerAvailabilityError is null;
     public bool CanApplyExisting => CanUpdateExisting && bridge.ItemSelectorAvailabilityError is null;
+    public bool CanStartListingItems => CanApplyExisting && bridge.LocalAvailabilityError is null;
     public string? ExistingUpdateError => bridge.RetainerAvailabilityError;
     public string? ExistingApplyError => bridge.ItemSelectorAvailabilityError;
+    public string? StartListingAvailabilityError => ExistingUpdateError ?? ExistingApplyError ?? bridge.LocalAvailabilityError;
     public bool HasRetainer => bridge.TryGetSession(out _, out _);
     public string Status { get; private set; } = "Open a retainer's selling list to begin.";
     public string Progress => work is Work.Scan ? $"Checking {Math.Min(index + 1, Rows.Count)} of {Rows.Count}"
+        : work is Work.BatchListing ? $"Listing {Math.Min(index + 1, batchCandidates.Count)} of {batchCandidates.Count}"
         : work is Work.Apply ? $"Updating {Math.Min(index + 1, applying.Count)} of {applying.Count}" : "";
 
     public void Update()
@@ -95,6 +104,7 @@ internal sealed class PricingController : IDisposable
         }
         if (work == Work.Single) TickSingle(now);
         else if (work == Work.Scan) TickScan(now);
+        else if (work == Work.BatchListing) TickBatchListing(now);
         else TickApply(now);
     }
 
@@ -151,12 +161,29 @@ internal sealed class PricingController : IDisposable
 
     public void StartListingItems()
     {
+        if (Busy) return;
+        if (!CanStartListingItems)
+        {
+            Status = StartListingAvailabilityError
+                ?? "Automatic listing is unavailable on this client build.";
+            return;
+        }
+        if (!bridge.TryGetSession(out var active, out var sessionError)) { Status = sessionError; return; }
+        if (bridge.TryReadSellItem(out _, out _))
+        { Status = "Close the individual selling window first, leaving the retainer's selling list open."; return; }
         SnapshotInventory();
         if (InventorySnapshotError is { } snapshotError) { Status = snapshotError; return; }
         if (InventoryCandidates.Count == 0) { Status = "No eligible items in carried inventory. Excluded and unmarketable items are skipped."; return; }
-        var candidate = InventoryCandidates[0];
-        if (!bridge.TryOpenInventoryItem(candidate, out var error)) { Status = error; return; }
-        Status = $"Opened {candidate.Name}{(candidate.IsHq ? " (HQ)" : " (NQ)")}. The price fills automatically when enabled; confirm it in game. After it closes, click Start listing items again for the next eligible stack.";
+        session = active;
+        batchCandidates = InventoryCandidates.ToList();
+        index = 0;
+        listingSucceeded = 0;
+        listingSkipped = 0;
+        listingCandidate = null;
+        step = Step.Start;
+        workSource = PriceSource.Local;
+        work = Work.BatchListing;
+        Status = $"Automatically listing {batchCandidates.Count} eligible stack(s) using the local marketboard. Each price is checked before the game's Confirm action.";
     }
 
     public bool OpenInventoryItem(CarriedItemCandidate item)
@@ -360,6 +387,130 @@ internal sealed class PricingController : IDisposable
         }
     }
 
+    private void TickBatchListing(DateTimeOffset now)
+    {
+        if (step == Step.Start)
+        {
+            if (index >= batchCandidates.Count)
+            {
+                FinishBatchListing($"Automatic listing complete: {listingSucceeded} listed, {listingSkipped} skipped.");
+                return;
+            }
+
+            var listedBefore = bridge.ReadExistingListings(out var listingError);
+            if (listingError.Length != 0) { Cancel($"Automatic listing stopped: {listingError}"); return; }
+            if (listedBefore.Count >= 20)
+            {
+                FinishBatchListing($"Stopped because the retainer has all 20 listing slots filled. {listingSucceeded} listed, {listingSkipped} skipped.");
+                return;
+            }
+
+            var candidate = batchCandidates[index];
+            if (!marketableItemIds.Contains(candidate.ItemId) || IsExcluded(candidate.ItemId))
+            { SkipBatchItem("Skipped an item that is now excluded or not marketable."); return; }
+
+            listingCandidate = candidate;
+            preListingSlots = listedBefore.Select(row => row.Slot).ToHashSet();
+            if (!bridge.TryOpenInventoryItem(candidate, out var openError))
+            { SkipBatchItem($"Skipped {candidate.Name}: {openError}"); return; }
+            workingItem = null;
+            deadline = now.AddSeconds(8);
+            step = Step.Opening;
+            return;
+        }
+
+        if (step == Step.Opening)
+        {
+            if (!bridge.TryReadSellItem(out var opened, out _))
+            {
+                if (now > deadline) SkipBatchItem("The next item sale window did not open in time.");
+                return;
+            }
+            if (listingCandidate is not { } expected || opened.IsExisting || opened.ItemId != expected.ItemId ||
+                opened.IsHq != expected.IsHq || opened.InventoryType != expected.InventoryType || opened.Slot != expected.Slot)
+            { Cancel("Automatic listing stopped because the opened item differs from the inventory snapshot. No price was submitted."); return; }
+
+            workingItem = opened;
+            if (!StartRequest(opened, now, out var requestError))
+            { SkipBatchItem($"Skipped {opened.Name}: {requestError}"); return; }
+            step = Step.Quote;
+            return;
+        }
+
+        if (step == Step.Quote)
+        {
+            if (workingItem is not { } current || listingCandidate is null)
+            { Cancel("Automatic listing stopped because the active item was lost."); return; }
+            if (!ReadRequest(current, now, out var snapshot, out var requestError)) return;
+            if (snapshot is null)
+            { SkipBatchItem($"Skipped {current.Name}: {requestError}"); return; }
+
+            var proposal = Calculate(snapshot, current);
+            if (!proposal.CanApply)
+            { SkipBatchItem($"Skipped {current.Name}: {proposal.Error}"); return; }
+            if (!bridge.TryCloseCompare(current, out var closeError))
+            { Cancel($"Automatic listing stopped before confirming {current.Name}: {closeError}"); return; }
+
+            listingSubmittedPrice = proposal.SuggestedPrice;
+            if (!bridge.TryConfirmNewListing(current, listingSubmittedPrice, out var confirmError))
+            { Cancel($"Automatic listing stopped before confirming {current.Name}: {confirmError}"); return; }
+            Status = $"Submitted {current.Name} at {listingSubmittedPrice:N0} gil each. Waiting for the retainer list to confirm it.";
+            deadline = now.AddSeconds(12);
+            step = Step.Confirming;
+            return;
+        }
+
+        if (step == Step.Confirming)
+        {
+            if (listingCandidate is not { } expected || workingItem is not { } submitted)
+            { Cancel("Automatic listing stopped because its confirmation target was lost."); return; }
+            var listed = bridge.ReadExistingListings(out var readError);
+            var sellWindowOpen = bridge.TryReadSellItem(out _, out _);
+            if (readError.Length == 0 && !sellWindowOpen && listed.Any(row => !preListingSlots.Contains(row.Slot)
+                    && row.ItemId == expected.ItemId && row.IsHq == expected.IsHq
+                    && row.Quantity == submitted.Quantity && row.CurrentPrice == listingSubmittedPrice))
+            {
+                listingSucceeded++;
+                index++;
+                listingCandidate = null;
+                workingItem = null;
+                step = Step.Start;
+                nextTick = now.AddMilliseconds(900);
+                Status = $"Listed {submitted.Name} at {listingSubmittedPrice:N0} gil each. Continuing with the next eligible item.";
+                return;
+            }
+            if (now > deadline)
+            {
+                Cancel("Stopped because the new listing was not confirmed in the retainer list. Check the game before retrying to avoid duplicate listings.");
+                return;
+            }
+        }
+    }
+
+    private void SkipBatchItem(string message)
+    {
+        if (workingItem is { } openItem && !bridge.TryClosePriceWindows(openItem, out var closeError))
+        { Cancel($"Automatic listing stopped while closing the skipped item: {closeError}"); return; }
+        listingSkipped++;
+        index++;
+        listingCandidate = null;
+        workingItem = null;
+        step = Step.Start;
+        ResetRequest();
+        Status = message;
+        nextTick = DateTimeOffset.UtcNow.AddMilliseconds(650);
+    }
+
+    private void FinishBatchListing(string message)
+    {
+        work = Work.Idle;
+        workingItem = null;
+        listingCandidate = null;
+        batchCandidates.Clear();
+        Status = message;
+        ResetRequest();
+    }
+
     private void ScanReceived(PriceRow row, PriceSnapshot snapshot)
     {
         row.Snapshot = snapshot;
@@ -484,9 +635,16 @@ internal sealed class PricingController : IDisposable
 
     public void Cancel(string message = "Stopped. Already submitted price changes remain applied.")
     {
+        var wasBatchListing = work == Work.BatchListing;
         ResetRequest();
         work = Work.Idle;
         manualTarget = null;
+        if (wasBatchListing)
+        {
+            batchCandidates.Clear();
+            listingCandidate = null;
+            workingItem = null;
+        }
         Status = message;
     }
 

@@ -40,7 +40,7 @@ internal sealed class MainWindow : Window
         ImGui.BeginDisabled(controller.Busy);
         var automatic = config.AutoPriceNewListings;
         if (ImGui.Checkbox("Automatically price new listings", ref automatic)) { config.AutoPriceNewListings = automatic; save(); }
-        ImGui.TextDisabled("Open an item for sale: its price is filled automatically. Confirm the new sale in the game.");
+        ImGui.TextDisabled("A single item window fills its price automatically. For a hands-off batch, use Price lookup → Start listing items with the local marketboard.");
         var source = (int)config.Source;
         ImGui.SetNextItemWidth(250);
         if (ImGui.Combo("Price source", ref source, "Universalis\0Local marketboard\0"))
@@ -51,7 +51,7 @@ internal sealed class MainWindow : Window
                 : "Universalis uses player-uploaded prices. Price age is not filtered; switch to Local for a fresh game check.");
         else
         {
-            ImGui.TextWrapped("Local opens Compare Prices for the item and waits for the complete marketboard response. Batch checks open one listing at a time.");
+            ImGui.TextWrapped("Local opens Compare Prices and waits for the complete marketboard response. Start listing items always uses this local source and confirms eligible listings automatically.");
             if (localError() is { } error) ImGui.TextWrapped(error);
         }
         ImGui.EndDisabled();
@@ -78,7 +78,7 @@ internal sealed class MainWindow : Window
         var item = controller.CurrentItem;
         if (item is null)
         {
-            ImGui.TextWrapped("Open Price lookup to search and retrieve a home-world price from the main menu. For automatic pricing, open your retainer's selling list and choose an item to sell or adjust.");
+            ImGui.TextWrapped("Open Price lookup to search and retrieve a home-world price from the main menu. For batch listing, open a retainer's selling list and click Start listing items.");
             return;
         }
         ImGui.TextUnformatted($"{item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")} · {item.Quantity:N0} items");
@@ -261,14 +261,18 @@ internal sealed class MainWindow : Window
     {
         ImGui.Separator();
         ImGui.TextUnformatted("Captured items");
-        ImGui.TextWrapped("Snapshot your carried inventory or the current retainer's listings. Untradeable and nonmarketable items, plus your saved exclusions, are skipped automatically.");
+        ImGui.TextWrapped("Open a retainer's selling list, then click Start listing items once. It snapshots carried inventory, skips untradeable, nonmarketable, and excluded items, then uses local marketboard prices to list eligible stacks one gil below the lowest matching listing. It confirms each sale and stops when inventory is done or the retainer's 20 slots are full. Use Stop to halt the batch.");
         ImGui.BeginDisabled(controller.Busy);
         if (ImGui.Button("Snapshot inventory")) dispatch(controller.SnapshotInventory);
         ImGui.SameLine();
         if (ImGui.Button("Snapshot retainer listings")) dispatch(controller.SnapshotListedItems);
+        ImGui.EndDisabled();
         ImGui.SameLine();
+        ImGui.BeginDisabled(controller.Busy || !controller.CanStartListingItems);
         if (ImGui.Button("Start listing items")) dispatch(controller.StartListingItems);
         ImGui.EndDisabled();
+        if (controller.StartListingAvailabilityError is { } listingAvailabilityError)
+            ImGui.TextWrapped(listingAvailabilityError);
 
         if (controller.InventorySnapshotError is { } inventoryError) ImGui.TextWrapped(inventoryError);
         else if (controller.InventorySnapshotAt is { } inventoryAt)
