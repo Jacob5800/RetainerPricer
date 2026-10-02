@@ -69,7 +69,7 @@ internal sealed class MainWindow : Window
             if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
             ImGui.PopStyleColor(3);
         }
-        ImGui.TextDisabled("Start listing items prices eligible carried inventory. Update existing listings reprices current stock. Both use fresh local marketboard data and skip exclusions.");
+        ImGui.TextDisabled("Start listing items prices eligible carried inventory. Update existing listings reprices current stock. Both use Universalis; items need a current competing price and a sale from the last 14 days.");
         if (controller.Busy)
             ImGui.TextDisabled("The active listing task is highlighted. Stop cancels it; changes already submitted remain applied.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
@@ -79,15 +79,15 @@ internal sealed class MainWindow : Window
         ImGui.TextDisabled("For batch actions, use the two buttons above; no price review or manual item entry is needed.");
         var source = (int)config.Source;
         ImGui.SetNextItemWidth(250);
-        if (ImGui.Combo("Price source", ref source, "Universalis\0Local marketboard\0"))
+        if (ImGui.Combo("On-screen price check source", ref source, "Universalis\0Local marketboard\0"))
         { config.Source = (PriceSource)source; save(); }
         if (config.Source == PriceSource.Universalis)
             ImGui.TextWrapped(config.UseMaximumPriceAge
-                ? $"Universalis uses player-uploaded prices and skips data older than {config.MaximumAgeMinutes} minutes. Switch to Local for a fresh game check."
-                : "Universalis uses player-uploaded prices. Price age is not filtered; switch to Local for a fresh game check.");
+                ? $"This source applies to Check price again on an open selling window. Universalis upload data older than {config.MaximumAgeMinutes} minutes is skipped. Automatic listing actions also require a sale in the last 14 days."
+                : "This source applies to Check price again on an open selling window. Upload age is not filtered; automatic listing actions always use Universalis and require sales in the last 14 days.");
         else
         {
-            ImGui.TextWrapped("Local opens Compare Prices and waits for the complete marketboard response. Both automatic buttons always use this live local source.");
+            ImGui.TextWrapped("This source applies only to Check price again on an open selling window. Automatic new listings and existing-listing updates always use Universalis.");
             if (localError() is { } error) ImGui.TextWrapped(error);
         }
         ImGui.EndDisabled();
@@ -476,7 +476,12 @@ internal sealed class MainWindow : Window
     }
 
     private static void DrawAge(PriceSnapshot snapshot)
-        => ImGui.TextUnformatted($"{snapshot.Source}: {Age(snapshot.ObservedAt)} old · {snapshot.ObservedAt.ToLocalTime():HH:mm:ss}");
+    {
+        var history = snapshot.Source != PriceSource.Universalis ? ""
+            : snapshot.MostRecentSaleAt is { } saleAt ? $" · last sale {Age(saleAt)} ago"
+            : " · no sale in the last 14 days";
+        ImGui.TextUnformatted($"{snapshot.Source}: {Age(snapshot.ObservedAt)} old · {snapshot.ObservedAt.ToLocalTime():HH:mm:ss}{history}");
+    }
 
     private static string Age(DateTimeOffset time)
     {

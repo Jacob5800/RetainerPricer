@@ -84,7 +84,7 @@ async Task RejectFetch(Func<Task<PriceSnapshot>> fetch, string expectedMessage, 
 
 var fetched = await Fetch((request, _) =>
 {
-    Assert(request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == "https://universalis.app/api/v2/74/5333?listings=100&entries=0",
+    Assert(request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == "https://universalis.app/api/v2/74/5333?entries=100&entriesWithin=1209600",
         "Single-world read-only request uses documented limits");
     Assert(request.Headers.UserAgent.ToString().StartsWith("RetainerPricer/"), "Identify application to API");
     return Task.FromResult(JsonResponse(Body()));

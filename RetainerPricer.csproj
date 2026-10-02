@@ -1,10 +1,10 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.1.9.0</Version>
+    <Version>0.1.10.0</Version>
     <Author>Jacob5800</Author>
     <Name>Retainer Pricer</Name>
     <Punchline>Automatically price new and existing retainer listings.</Punchline>
-    <Description>Automatically price eligible inventory and reprice existing listings one gil below matching competition using live local marketboard data. Persistent item exclusions remain user controlled.</Description>
+    <Description>Automatically price eligible inventory and reprice existing listings one gil below matching competition using Universalis market prices and recent sale history.</Description>
     <RepoUrl>https://github.com/Jacob5800/RetainerPricer</RepoUrl>
     <Tags>retainer;marketboard;prices;universalis</Tags>
     <OutputPath>$(MSBuildProjectDirectory)\dist\$(Configuration)\</OutputPath>

@@ -23,7 +23,8 @@ public sealed record PriceSnapshot(
     PriceSource Source,
     DateTimeOffset ObservedAt,
     IReadOnlyList<MarketListing> Listings,
-    bool IsComplete = true);
+    bool IsComplete = true,
+    DateTimeOffset? MostRecentSaleAt = null);
 
 public sealed record PriceProposal(uint LowestPrice, uint SuggestedPrice, int MatchingListings, string? Error)
 {

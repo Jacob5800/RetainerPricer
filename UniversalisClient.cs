@@ -14,7 +14,8 @@ namespace RetainerPricer;
 public sealed class UniversalisClient : IDisposable
 {
     private const int MaximumResponseBytes = 1_048_576;
-    private const int ListingLimit = 100;
+    private const int HistoryEntryLimit = 100;
+    private const int HistoryWindowSeconds = 14 * 24 * 60 * 60;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
     private readonly HttpClient client;
     private readonly bool ownsClient;
@@ -42,9 +43,9 @@ public sealed class UniversalisClient : IDisposable
         deadline.CancelAfter(RequestTimeout);
         try
         {
-            // https://docs.universalis.app/ — the world-specific CurrentlyShown endpoint.
+            // https://docs.universalis.app/ — current listings and sales in the previous 14 days.
             using var request = new HttpRequestMessage(HttpMethod.Get,
-                $"https://universalis.app/api/v2/{worldId}/{itemId}?listings={ListingLimit}&entries=0");
+                $"https://universalis.app/api/v2/{worldId}/{itemId}?entries={HistoryEntryLimit}&entriesWithin={HistoryWindowSeconds}");
             request.Headers.UserAgent.ParseAdd("RetainerPricer/0.1");
             request.Headers.Accept.ParseAdd("application/json");
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
@@ -59,9 +60,9 @@ public sealed class UniversalisClient : IDisposable
             if (response.StatusCode == HttpStatusCode.NotFound)
                 throw new InvalidOperationException("Universalis has no data for this item and world.");
             if (!response.IsSuccessStatusCode)
-                throw new InvalidOperationException($"Universalis returned HTTP {(int)response.StatusCode}. Try again later or use a local comparison.");
+                throw new InvalidOperationException($"Universalis returned HTTP {(int)response.StatusCode}. Try again later.");
             if (response.Content.Headers.ContentLength > MaximumResponseBytes)
-                throw new InvalidOperationException("The Universalis response was unexpectedly large. Use a local comparison.");
+                throw new InvalidOperationException("Universalis returned too much market data. Try this item again later.");
 
             await using var source = await response.Content.ReadAsStreamAsync(deadline.Token).ConfigureAwait(false);
             using var buffer = new MemoryStream();
@@ -71,18 +72,18 @@ public sealed class UniversalisClient : IDisposable
                 var read = await source.ReadAsync(chunk, deadline.Token).ConfigureAwait(false);
                 if (read == 0) break;
                 if (buffer.Length + read > MaximumResponseBytes)
-                    throw new InvalidOperationException("The Universalis response was unexpectedly large. Use a local comparison.");
+                    throw new InvalidOperationException("Universalis returned too much market data. Try this item again later.");
                 buffer.Write(chunk, 0, read);
             }
             return Parse(buffer.ToArray(), worldId, itemId);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            throw new InvalidOperationException("Universalis did not respond in time. Try again or use a local comparison.");
+            throw new InvalidOperationException("Universalis did not respond in time. Try again later.");
         }
         catch (HttpRequestException ex)
         {
-            throw new InvalidOperationException("Could not reach Universalis. Check your connection or use a local comparison.", ex);
+            throw new InvalidOperationException("Could not reach Universalis. Check your connection and try again.", ex);
         }
         catch (IOException ex)
         {
@@ -120,8 +121,6 @@ public sealed class UniversalisClient : IDisposable
             var observedAt = DateTimeOffset.FromUnixTimeMilliseconds(milliseconds);
             if (!root.TryGetProperty("listings", out var listings) || listings.ValueKind != JsonValueKind.Array)
                 throw Invalid("missing listings.");
-            if (listings.GetArrayLength() > ListingLimit)
-                throw Invalid("too many listings for the requested limit.");
             var totalCount = UInt(root, "listingsCount");
             if (totalCount < listings.GetArrayLength()) throw Invalid("inconsistent listing count.");
 
@@ -152,20 +151,37 @@ public sealed class UniversalisClient : IDisposable
                 results.Add(new MarketListing(itemId, Bool(listing, "hq"), price, quantity, retainerId, Bool(listing, "onMannequin")));
             }
 
+            DateTimeOffset? mostRecentSaleAt = null;
+            if (root.TryGetProperty("recentHistory", out var recentHistory) && recentHistory.ValueKind != JsonValueKind.Null)
+            {
+                if (recentHistory.ValueKind != JsonValueKind.Array)
+                    throw Invalid("invalid recent sale history.");
+                foreach (var sale in recentHistory.EnumerateArray())
+                {
+                    if (sale.ValueKind != JsonValueKind.Object || !sale.TryGetProperty("timestamp", out var timestamp)
+                        || !timestamp.TryGetInt64(out var seconds) || seconds <= 0)
+                        throw Invalid("invalid recent sale timestamp.");
+                    var soldAt = DateTimeOffset.FromUnixTimeSeconds(seconds);
+                    if (mostRecentSaleAt is null || soldAt > mostRecentSaleAt.Value)
+                        mostRecentSaleAt = soldAt;
+                }
+            }
+
             // Use upload age, never request completion time, to detect stale cached prices.
-            return new(itemId, worldId, PriceSource.Universalis, observedAt, results.AsReadOnly(), totalCount == results.Count);
+            return new(itemId, worldId, PriceSource.Universalis, observedAt, results.AsReadOnly(),
+                totalCount == results.Count, mostRecentSaleAt);
         }
         catch (JsonException ex)
         {
-            throw new InvalidOperationException("Universalis returned malformed JSON. Try again or use a local comparison.", ex);
+            throw new InvalidOperationException("Universalis returned malformed JSON. Try again later.", ex);
         }
         catch (ArgumentOutOfRangeException ex)
         {
-            throw new InvalidOperationException("Universalis returned an invalid market timestamp. Use a local comparison.", ex);
+            throw new InvalidOperationException("Universalis returned an invalid market timestamp. Try again later.", ex);
         }
         catch (InvalidOperationException ex) when (!ex.Message.StartsWith("Universalis", StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("Universalis returned malformed market fields. Use a local comparison.", ex);
+            throw new InvalidOperationException("Universalis returned malformed market fields. Try again later.", ex);
         }
     }
 

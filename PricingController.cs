@@ -73,10 +73,10 @@ internal sealed class PricingController : IDisposable
     public bool IsUpdatingListings => work == Work.Scan;
     public bool CanUpdateExisting => bridge.RetainerAvailabilityError is null;
     public bool CanApplyExisting => CanUpdateExisting && bridge.ItemSelectorAvailabilityError is null;
-    public bool CanStartListingItems => CanApplyExisting && bridge.LocalAvailabilityError is null;
+    public bool CanStartListingItems => CanApplyExisting;
     public string? ExistingUpdateError => bridge.RetainerAvailabilityError;
     public string? ExistingApplyError => bridge.ItemSelectorAvailabilityError;
-    public string? StartListingAvailabilityError => ExistingUpdateError ?? ExistingApplyError ?? bridge.LocalAvailabilityError;
+    public string? StartListingAvailabilityError => ExistingUpdateError ?? ExistingApplyError;
     public bool HasRetainer => bridge.TryGetSession(out _, out _);
     public string Status { get; private set; } = "Open a retainer's selling list to begin.";
     public string Progress => work is Work.Scan ? $"Checking {Math.Min(index + 1, Rows.Count)} of {Rows.Count}"
@@ -187,9 +187,9 @@ internal sealed class PricingController : IDisposable
         listingSkipped = 0;
         listingCandidate = null;
         step = Step.Start;
-        workSource = PriceSource.Local;
+        workSource = PriceSource.Universalis;
         work = Work.BatchListing;
-        Status = $"Automatically listing {batchCandidates.Count} eligible stack(s) using the local marketboard. Each price is checked before the game's Confirm action.";
+        Status = $"Automatically listing {batchCandidates.Count} eligible stack(s) using Universalis. Each item needs a current competing listing and a sale from the last 14 days.";
     }
 
     public void SnapshotExceptionInventory()
@@ -236,7 +236,7 @@ internal sealed class PricingController : IDisposable
         CurrentSnapshot = null;
         CurrentProposal = null;
         autoApply = fillAutomatically;
-        workSource = config.Source;
+        workSource = fillAutomatically ? PriceSource.Universalis : config.Source;
         ResetRequest();
         work = Work.Single;
         step = Step.Start;
@@ -274,8 +274,8 @@ internal sealed class PricingController : IDisposable
         index = 0;
         step = Step.Start;
         cache.Clear();
-        workSource = PriceSource.Local;
-        Status = $"Automatically checking and updating {items.Count} eligible listing(s) with fresh local marketboard prices ({excluded} excluded, {unmarketable} not marketable).";
+        workSource = PriceSource.Universalis;
+        Status = $"Automatically checking and updating {items.Count} eligible listing(s) with Universalis ({excluded} excluded, {unmarketable} not marketable). Items without a competing listing or a sale in the last 14 days will be left unchanged.";
     }
 
     private void TickManual(DateTimeOffset now)
@@ -312,7 +312,7 @@ internal sealed class PricingController : IDisposable
         if (now > deadline)
         {
             cancellation.Cancel();
-            FinishManual("Universalis did not respond in time. Try again or choose Local while an item sell window is open.");
+            FinishManual("Universalis did not respond in time. Try again later.");
         }
     }
 
@@ -358,18 +358,10 @@ internal sealed class PricingController : IDisposable
         if (step == Step.Start)
         {
             ResetRequest();
-            workingItem = row.Item;
-            if (workSource == PriceSource.Local)
-            {
-                if (!bridge.TryOpenExisting(row.Item, out var error)) { ScanFailed(row, error); return; }
-                deadline = now.AddSeconds(8);
-                step = Step.Opening;
-                return;
-            }
-            if (cache.TryGetValue((row.Item.Session.WorldId, row.Item.ItemId), out var cached))
-            { ScanReceived(row, cached); return; }
-            if (!StartRequest(row.Item, now, out var failed)) { ScanFailed(row, failed); return; }
-            step = Step.Quote;
+            if (!bridge.TryOpenExisting(row.Item, out var openError)) { ScanFailed(row, openError); return; }
+            deadline = now.AddSeconds(8);
+            step = Step.Opening;
+            return;
         }
         if (step == Step.Opening)
         {
@@ -390,7 +382,7 @@ internal sealed class PricingController : IDisposable
             if (workingItem is not null && row.Proposal is { CanApply: true } proposal
                 && proposal.SuggestedPrice != workingItem.CurrentPrice)
             {
-                if (!bridge.TryCloseCompare(workingItem, out var closeError))
+                if (workSource == PriceSource.Local && !bridge.TryCloseCompare(workingItem, out var closeError))
                 { Cancel($"Could not close the price comparison before updating {row.Item.Name}: {closeError}"); return; }
                 submittedPrice = proposal.SuggestedPrice;
                 if (!bridge.TrySetExistingPrice(workingItem, submittedPrice, out var updateError))
@@ -493,7 +485,7 @@ internal sealed class PricingController : IDisposable
                 return;
             }
             step = Step.Quote;
-            Status = $"Checking the local market price for {opened.Name}{(opened.IsHq ? " (HQ)" : " (NQ)")}...";
+            Status = $"Checking the Universalis price for {opened.Name}{(opened.IsHq ? " (HQ)" : " (NQ)")}...";
             return;
         }
 
@@ -530,7 +522,7 @@ internal sealed class PricingController : IDisposable
             { Cancel("Automatic listing stopped because the active item was lost."); return; }
             if (!ReadRequest(current, now, out var snapshot, out var requestError))
             {
-                Status = $"Waiting for the local marketboard price for {current.Name}{(current.IsHq ? " (HQ)" : " (NQ)")}...";
+                Status = $"Waiting for the Universalis price for {current.Name}{(current.IsHq ? " (HQ)" : " (NQ)")}...";
                 return;
             }
             if (snapshot is null)
@@ -539,19 +531,21 @@ internal sealed class PricingController : IDisposable
             var proposal = Calculate(snapshot, current);
             if (!proposal.CanApply)
             { SkipBatchItem($"Skipped {current.Name}: {proposal.Error}"); return; }
-            if (!bridge.TryCloseCompare(current, out var closeError))
+            if (workSource == PriceSource.Local && !bridge.TryCloseCompare(current, out var closeError))
             { Cancel($"Automatic listing stopped before confirming {current.Name}: {closeError}"); return; }
 
             listingSubmittedPrice = proposal.SuggestedPrice;
             deadline = now.AddSeconds(8);
             step = Step.ClosingListingCompare;
-            Status = $"Got a price for {current.Name}. Closing the comparison before confirming the sale.";
+            Status = workSource == PriceSource.Local
+                ? $"Got a price for {current.Name}. Closing the comparison before confirming the sale."
+                : $"Got a Universalis price for {current.Name}. Confirming the sale.";
             return;
         }
 
         if (step == Step.ClosingListingCompare)
         {
-            if (bridge.IsComparisonVisible || bridge.IsLocalSearchBusy)
+            if (workSource == PriceSource.Local && (bridge.IsComparisonVisible || bridge.IsLocalSearchBusy))
             {
                 if (now > deadline) Cancel("Automatic listing stopped because the market comparison did not close safely. No sale was confirmed.");
                 return;
@@ -568,7 +562,7 @@ internal sealed class PricingController : IDisposable
 
         if (step == Step.ClosingSkippedCompare)
         {
-            if (bridge.IsComparisonVisible || bridge.IsLocalSearchBusy)
+            if (bridge.IsComparisonVisible || (workSource == PriceSource.Local && bridge.IsLocalSearchBusy))
             {
                 if (now > deadline) Cancel("Automatic listing stopped because the skipped item's market comparison did not close. Close it manually before retrying.");
                 return;
@@ -671,14 +665,13 @@ internal sealed class PricingController : IDisposable
             : row.Proposal.SuggestedPrice == row.Item.CurrentPrice ? "Already priced"
             : "Ready";
         cache[(row.Item.Session.WorldId, row.Item.ItemId)] = snapshot;
-        if (workSource == PriceSource.Local) step = Step.Closing;
-        else { index++; step = Step.Start; nextTick = DateTimeOffset.UtcNow.AddMilliseconds(650); }
+        step = Step.Closing;
     }
 
     private void ScanFailed(PriceRow row, string error)
     {
         row.Status = error;
-        if (workSource == PriceSource.Local && workingItem is { DialogGeneration: > 0 }) step = Step.Closing;
+        if (workingItem is { DialogGeneration: > 0 }) step = Step.Closing;
         else { index++; step = Step.Start; }
     }
 
@@ -711,7 +704,9 @@ internal sealed class PricingController : IDisposable
         if (localRequested && bridge.TryGetLocalSnapshot(item, out snapshot, out error)) return true;
         if (!string.IsNullOrEmpty(error)) return true;
         if (now <= deadline) return false;
-        error = "The price check timed out. Check locally or try again.";
+        error = workSource == PriceSource.Universalis
+            ? "Universalis price check timed out. Try again later."
+            : "Local price check timed out. Try again.";
         cancellation.Cancel();
         return true;
     }
