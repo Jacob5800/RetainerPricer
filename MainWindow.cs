@@ -37,16 +37,12 @@ internal sealed class MainWindow : Window
     {
         ImGui.TextWrapped("One gil below the lowest matching listing on your home world. HQ and NQ are compared separately; your own retainers are excluded.");
         if (retainerError() is { } nativeError) ImGui.TextWrapped(nativeError);
-        var hasRetainer = controller.HasRetainer;
-        ImGui.BeginDisabled(controller.Busy || !hasRetainer || !controller.CanStartListingItems);
         if (ImGui.Button("Start listing items")) dispatch(controller.StartListingItems);
         ImGui.SameLine();
         if (ImGui.Button("Update existing listings")) dispatch(controller.UpdateExistingListings);
-        ImGui.EndDisabled();
-        if (!hasRetainer)
-            ImGui.TextDisabled("Open a retainer's selling list on your home world to enable automatic pricing.");
-        else
-            ImGui.TextDisabled("Start listing items automatically prices and lists eligible carried inventory. Update existing listings reprices current stock. Both use fresh local marketboard data and skip exclusions.");
+        ImGui.TextDisabled("Start listing items prices eligible carried inventory. Update existing listings reprices current stock. Both use fresh local marketboard data and skip exclusions.");
+        if (controller.Busy)
+            ImGui.TextDisabled("A pricing task is already running. Stop it before starting another.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
         ImGui.BeginDisabled(controller.Busy);
         var automatic = config.AutoPriceNewListings;
