@@ -5,13 +5,12 @@ internal sealed class PriceRow(SellItem item)
     public SellItem Item { get; } = item;
     public PriceSnapshot? Snapshot { get; set; }
     public PriceProposal? Proposal { get; set; }
-    public bool Selected { get; set; } = true;
     public string Status { get; set; } = "Waiting";
 }
 
 internal sealed class PricingController : IDisposable
 {
-    private enum Work { Idle, Single, Manual, Scan, Apply, BatchListing }
+    private enum Work { Idle, Single, Manual, Scan, BatchListing }
     private enum Step { Start, Opening, Quote, Closing, Confirming }
     private readonly NativeMarketBridge bridge;
     private readonly UniversalisClient universalis;
@@ -33,7 +32,6 @@ internal sealed class PricingController : IDisposable
     private bool localRequested;
     private PriceSource workSource;
     private uint submittedPrice;
-    private List<PriceRow> applying = [];
     private List<CarriedItemCandidate> batchCandidates = [];
     private HashSet<int> preListingSlots = [];
     private CarriedItemCandidate? listingCandidate;
@@ -76,7 +74,7 @@ internal sealed class PricingController : IDisposable
     public string Status { get; private set; } = "Open a retainer's selling list to begin.";
     public string Progress => work is Work.Scan ? $"Checking {Math.Min(index + 1, Rows.Count)} of {Rows.Count}"
         : work is Work.BatchListing ? $"Listing {Math.Min(index + 1, batchCandidates.Count)} of {batchCandidates.Count}"
-        : work is Work.Apply ? $"Updating {Math.Min(index + 1, applying.Count)} of {applying.Count}" : "";
+        : "";
 
     public void Update()
     {
@@ -105,7 +103,6 @@ internal sealed class PricingController : IDisposable
         if (work == Work.Single) TickSingle(now);
         else if (work == Work.Scan) TickScan(now);
         else if (work == Work.BatchListing) TickBatchListing(now);
-        else TickApply(now);
     }
 
     public void CheckManualItem(ItemChoice item, bool isHq, MarketWorld world)
@@ -169,6 +166,8 @@ internal sealed class PricingController : IDisposable
             return;
         }
         if (!bridge.TryGetSession(out var active, out var sessionError)) { Status = sessionError; return; }
+        if (!bridge.TryGetOwnRetainerIds(out _))
+        { Status = "Retainer ownership data is not ready. Reopen the retainer selling list and try again; prices will not be submitted until your own listings can be excluded."; return; }
         if (bridge.TryReadSellItem(out _, out _))
         { Status = "Close the individual selling window first, leaving the retainer's selling list open."; return; }
         SnapshotInventory();
@@ -199,10 +198,7 @@ internal sealed class PricingController : IDisposable
         InventoryCandidates.RemoveAll(item => item.ItemId == itemId);
         ListedCandidates.RemoveAll(item => item.ItemId == itemId);
         foreach (var row in Rows.Where(row => row.Item.ItemId == itemId))
-        {
-            row.Selected = false;
             row.Status = "Excluded";
-        }
     }
 
     public void CheckCurrent(bool fillAutomatically = false)
@@ -235,13 +231,15 @@ internal sealed class PricingController : IDisposable
             : error;
     }
 
-    public void ScanExisting()
+    public void UpdateExistingListings()
     {
         if (Busy) return;
-        if (!CanUpdateExisting) { Status = ExistingUpdateError!; return; }
+        if (!CanStartListingItems) { Status = StartListingAvailabilityError!; return; }
         Rows.Clear();
         if (bridge.TryReadSellItem(out _, out _)) { Status = "Close the individual selling window first, leaving the retainer's selling list open."; return; }
         if (!bridge.TryGetSession(out var active, out var error)) { Status = error; return; }
+        if (!bridge.TryGetOwnRetainerIds(out _))
+        { Status = "Retainer ownership data is not ready. Reopen the retainer selling list and try again; no listing will be repriced until your own stock can be excluded."; return; }
         var items = bridge.ReadExistingListings(out error);
         if (items.Count == 0) { Status = string.IsNullOrEmpty(error) ? "This retainer has no listings." : error; return; }
         var unmarketable = items.Count(item => !marketableItemIds.Contains(item.ItemId));
@@ -254,27 +252,8 @@ internal sealed class PricingController : IDisposable
         index = 0;
         step = Step.Start;
         cache.Clear();
-        workSource = config.Source;
-        Status = $"Checking {items.Count} existing listing(s) ({excluded} excluded, {unmarketable} not marketable). Review the suggested prices before applying.";
-    }
-
-    public void ApplyReviewed()
-    {
-        if (Busy) return;
-        if (!CanUpdateExisting) { Status = ExistingUpdateError!; return; }
-        if (!CanApplyExisting) { Status = ExistingApplyError ?? "The game item selector is unavailable."; return; }
-        if (bridge.TryReadSellItem(out _, out _)) { Status = "Close the individual selling window before updating the reviewed listings."; return; }
-        applying = Rows.Where(x => x.Selected && !IsExcluded(x.Item.ItemId) && x.Proposal is { CanApply: true }
-            && x.Proposal.SuggestedPrice != x.Item.CurrentPrice
-            && (!config.OnlyLowerExistingPrices || x.Proposal.SuggestedPrice < x.Item.CurrentPrice)).ToList();
-        if (applying.Count == 0) { Status = "No selected price changes to apply."; return; }
-        if (!bridge.TryGetSession(out var active, out var error) || applying.Any(x => x.Item.Session != active))
-        { Status = string.IsNullOrEmpty(error) ? "The reviewed retainer changed. Check existing listings again." : error; return; }
-        session = active;
-        work = Work.Apply;
-        index = 0;
-        step = Step.Start;
-        Status = "Applying the selected prices. Keep this retainer's selling list open.";
+        workSource = PriceSource.Local;
+        Status = $"Automatically checking and updating {items.Count} eligible listing(s) with fresh local marketboard prices ({excluded} excluded, {unmarketable} not marketable).";
     }
 
     private void TickManual(DateTimeOffset now)
@@ -345,7 +324,14 @@ internal sealed class PricingController : IDisposable
 
     private void TickScan(DateTimeOffset now)
     {
-        if (index >= Rows.Count) { Finish("Price check complete. Review the table and apply your selected changes."); return; }
+        if (index >= Rows.Count)
+        {
+            var updated = Rows.Count(row => row.Status == "Updated");
+            var unchanged = Rows.Count(row => row.Status == "Already priced");
+            var skipped = Rows.Count - updated - unchanged;
+            Finish($"Existing listing update complete: {updated} updated, {unchanged} already at target, {skipped} left unchanged because a safe price was unavailable.");
+            return;
+        }
         var row = Rows[index];
         if (step == Step.Start)
         {
@@ -379,11 +365,52 @@ internal sealed class PricingController : IDisposable
         }
         if (step == Step.Closing)
         {
+            if (workingItem is not null && row.Proposal is { CanApply: true } proposal
+                && proposal.SuggestedPrice != workingItem.CurrentPrice)
+            {
+                if (!bridge.TryCloseCompare(workingItem, out var closeError))
+                { Cancel($"Could not close the price comparison before updating {row.Item.Name}: {closeError}"); return; }
+                submittedPrice = proposal.SuggestedPrice;
+                if (!bridge.TrySetExistingPrice(workingItem, submittedPrice, out var updateError))
+                { Cancel($"Stopped while updating {row.Item.Name}: {updateError}"); return; }
+                row.Status = "Submitted; verifying update";
+                Status = $"Submitted {row.Item.Name} at {submittedPrice:N0} gil each. Verifying the retainer update.";
+                deadline = now.AddSeconds(10);
+                step = Step.Confirming;
+                return;
+            }
             if (workingItem is not null && !bridge.TryClosePriceWindows(workingItem, out var error))
-            { Cancel(error); return; }
+            { Cancel($"Could not close the price window for {row.Item.Name}: {error}"); return; }
+            if (row.Proposal is { CanApply: true } unchangedProposal && unchangedProposal.SuggestedPrice == row.Item.CurrentPrice)
+                row.Status = "Already priced";
             index++;
             step = Step.Start;
+            workingItem = null;
+            ResetRequest();
             nextTick = now.AddMilliseconds(650);
+        }
+
+        if (step == Step.Confirming)
+        {
+            var listed = bridge.ReadExistingListings(out var readError);
+            var sellWindowOpen = bridge.TryReadSellItem(out _, out _);
+            var current = readError.Length == 0 ? listed.FirstOrDefault(item => item.Slot == row.Item.Slot) : null;
+            if (!sellWindowOpen && current is not null && SameListingIdentity(row.Item, current)
+                && current.CurrentPrice == submittedPrice)
+            {
+                row.Status = "Updated";
+                index++;
+                step = Step.Start;
+                workingItem = null;
+                ResetRequest();
+                nextTick = now.AddMilliseconds(750);
+                return;
+            }
+            if (now > deadline)
+            {
+                row.Status = "Submitted; confirmation not observed";
+                Cancel("Stopped because the last existing-listing update could not be confirmed. Check the retainer before running this again.");
+            }
         }
     }
 
@@ -517,9 +544,7 @@ internal sealed class PricingController : IDisposable
         row.Proposal = Calculate(snapshot, row.Item);
         row.Status = !row.Proposal.CanApply ? row.Proposal.Error!
             : row.Proposal.SuggestedPrice == row.Item.CurrentPrice ? "Already priced"
-            : config.OnlyLowerExistingPrices && row.Proposal.SuggestedPrice > row.Item.CurrentPrice ? "Already lower"
             : "Ready";
-        row.Selected = row.Status == "Ready";
         cache[(row.Item.Session.WorldId, row.Item.ItemId)] = snapshot;
         if (workSource == PriceSource.Local) step = Step.Closing;
         else { index++; step = Step.Start; nextTick = DateTimeOffset.UtcNow.AddMilliseconds(650); }
@@ -528,55 +553,9 @@ internal sealed class PricingController : IDisposable
     private void ScanFailed(PriceRow row, string error)
     {
         row.Status = error;
-        row.Selected = false;
         if (workSource == PriceSource.Local && workingItem is { DialogGeneration: > 0 }) step = Step.Closing;
         else { index++; step = Step.Start; }
     }
-
-    private void TickApply(DateTimeOffset now)
-    {
-        if (index >= applying.Count) { Finish("Finished processing the reviewed listings. See each row for its result."); return; }
-        var row = applying[index];
-        if (step == Step.Start)
-        {
-            if (row.Snapshot is null) { ApplyFailed(row, "No price data."); return; }
-            var recalculated = Calculate(row.Snapshot, row.Item);
-            if (!recalculated.CanApply || recalculated.SuggestedPrice != row.Proposal?.SuggestedPrice)
-            { ApplyFailed(row, recalculated.Error ?? "Suggested price changed. Check again."); return; }
-            if (!bridge.TryOpenExisting(row.Item, out var error)) { ApplyFailed(row, error); return; }
-            deadline = now.AddSeconds(8);
-            step = Step.Opening;
-            return;
-        }
-        if (step == Step.Opening)
-        {
-            if (!bridge.TryReadSellItem(out var opened, out _))
-            { if (now > deadline) Cancel("Stopped because the listing window did not open in time. Check the retainer UI before resuming."); return; }
-            if (row.Snapshot is null) { Cancel("Stopped because this listing has no reviewed price data."); return; }
-            var fresh = Calculate(row.Snapshot, row.Item);
-            if (!fresh.CanApply || fresh.SuggestedPrice != row.Proposal?.SuggestedPrice)
-            { Cancel(fresh.Error ?? "The reviewed price changed while the listing window opened. Review the prices again."); return; }
-            if (!SameListing(row.Item, opened)) { Cancel("The listing changed during the update. Review the current retainer's stock again."); return; }
-            workingItem = opened;
-            submittedPrice = row.Proposal!.SuggestedPrice;
-            if (!bridge.TrySetExistingPrice(opened, submittedPrice, out var error)) { Cancel(error); return; }
-            row.Status = "Submitted; waiting for listing update";
-            step = Step.Confirming;
-            deadline = now.AddSeconds(10);
-            return;
-        }
-        if (step == Step.Confirming)
-        {
-            var current = bridge.ReadExistingListings(out _).FirstOrDefault(x => x.Slot == row.Item.Slot);
-            if (current is not null && SameListingIdentity(row.Item, current) && current.CurrentPrice == submittedPrice
-                && !bridge.TryReadSellItem(out _, out _))
-            { row.Status = "Updated"; row.Selected = false; index++; step = Step.Start; nextTick = now.AddMilliseconds(750); }
-            else if (now > deadline) { row.Status = "Submitted; confirmation not observed"; Cancel("Stopped because the last listing update could not be confirmed. Check it in the game before retrying."); }
-        }
-    }
-
-    private void ApplyFailed(PriceRow row, string error)
-    { row.Status = error; row.Selected = false; index++; step = Step.Start; }
 
     private bool StartRequest(SellItem item, DateTimeOffset now, out string error)
     {

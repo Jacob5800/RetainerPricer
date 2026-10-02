@@ -57,7 +57,7 @@ public static class PriceCalculator
         }
 
         if (matches == 0)
-            return Fail("No competing listings of the same quality were found. Enter a price manually.");
+            return Fail("No competing listings of the same quality were found. No automatic price was applied.");
         if (lowest == 1)
             return Fail("The lowest competing price is already 1 gil and cannot be undercut.", lowest, matches);
 

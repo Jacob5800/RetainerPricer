@@ -11,7 +11,6 @@ public sealed class PluginConfig : IPluginConfiguration
     public int MaximumAgeMinutes { get; set; } = 15;
     public bool UseMaximumPriceAge { get; set; }
     public int MinimumPrice { get; set; } = 1;
-    public bool OnlyLowerExistingPrices { get; set; } = true;
     public List<uint> ExcludedItemIds { get; set; } = [];
 
     public void Normalize()

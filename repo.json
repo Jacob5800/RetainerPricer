@@ -3,17 +3,17 @@
     "Author": "Jacob5800",
     "Name": "Retainer Pricer",
     "InternalName": "RetainerPricer",
-    "AssemblyVersion": "0.1.1.0",
+    "AssemblyVersion": "0.1.3.0",
     "TestingAssemblyVersion": null,
     "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
-    "Punchline": "Price new items and update retainer listings.",
-    "Description": "Automatically price new retainer listings one gil below matching competition. Review and apply changes to existing stock using Universalis or local marketboard prices.",
+    "Punchline": "Automatically price new and existing retainer listings.",
+    "Description": "Automatically price eligible inventory and reprice existing listings one gil below matching competition using live local marketboard data. Persistent item exclusions remain user controlled.",
     "IsHide": false,
     "IsTestingExclusive": false,
     "DownloadLinkInstall": "https://github.com/Jacob5800/RetainerPricer/releases/latest/download/latest.zip",
     "DownloadLinkUpdate": "https://github.com/Jacob5800/RetainerPricer/releases/latest/download/latest.zip",
-    "LastUpdate": "1790898009"
+    "LastUpdate": "1790903368"
   }
 ]

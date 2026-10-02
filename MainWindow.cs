@@ -37,10 +37,21 @@ internal sealed class MainWindow : Window
     {
         ImGui.TextWrapped("One gil below the lowest matching listing on your home world. HQ and NQ are compared separately; your own retainers are excluded.");
         if (retainerError() is { } nativeError) ImGui.TextWrapped(nativeError);
+        var hasRetainer = controller.HasRetainer;
+        ImGui.BeginDisabled(controller.Busy || !hasRetainer || !controller.CanStartListingItems);
+        if (ImGui.Button("Start listing items")) dispatch(controller.StartListingItems);
+        ImGui.SameLine();
+        if (ImGui.Button("Update existing listings")) dispatch(controller.UpdateExistingListings);
+        ImGui.EndDisabled();
+        if (!hasRetainer)
+            ImGui.TextDisabled("Open a retainer's selling list on your home world to enable automatic pricing.");
+        else
+            ImGui.TextDisabled("Start listing items automatically prices and lists eligible carried inventory. Update existing listings reprices current stock. Both use fresh local marketboard data and skip exclusions.");
+        if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
         ImGui.BeginDisabled(controller.Busy);
         var automatic = config.AutoPriceNewListings;
         if (ImGui.Checkbox("Automatically price new listings", ref automatic)) { config.AutoPriceNewListings = automatic; save(); }
-        ImGui.TextDisabled("A single item window fills its price automatically. For a hands-off batch, use Price lookup → Start listing items with the local marketboard.");
+        ImGui.TextDisabled("For batch actions, use the two buttons above; no price review or manual item entry is needed.");
         var source = (int)config.Source;
         ImGui.SetNextItemWidth(250);
         if (ImGui.Combo("Price source", ref source, "Universalis\0Local marketboard\0"))
@@ -51,7 +62,7 @@ internal sealed class MainWindow : Window
                 : "Universalis uses player-uploaded prices. Price age is not filtered; switch to Local for a fresh game check.");
         else
         {
-            ImGui.TextWrapped("Local opens Compare Prices and waits for the complete marketboard response. Start listing items always uses this local source and confirms eligible listings automatically.");
+            ImGui.TextWrapped("Local opens Compare Prices and waits for the complete marketboard response. Both automatic buttons always use this live local source.");
             if (localError() is { } error) ImGui.TextWrapped(error);
         }
         ImGui.EndDisabled();
@@ -107,28 +118,17 @@ internal sealed class MainWindow : Window
 
     private void DrawExisting()
     {
-        ImGui.TextWrapped("Keep the current retainer's selling list open. Check prices, review the changes below, then apply the selected rows.");
+        ImGui.TextWrapped("The Update existing listings button checks each eligible listing against the live local marketboard, sets it one gil below the lowest comparable listing, then verifies the retainer accepted the change. Rows without a safe price are left untouched.");
         if (controller.ExistingUpdateError is { } updateError) ImGui.TextWrapped(updateError);
         if (controller.ExistingApplyError is { } applyError) ImGui.TextWrapped(applyError);
-        ImGui.BeginDisabled(controller.Busy || !controller.CanUpdateExisting);
-        if (ImGui.Button("Update existing listings")) dispatch(controller.ScanExisting);
-        if (controller.Rows.Count > 0)
-        {
-            ImGui.SameLine();
-            ImGui.BeginDisabled(controller.Busy || !controller.CanApplyExisting);
-            if (ImGui.Button("Apply selected updates")) dispatch(controller.ApplyReviewed);
-            ImGui.EndDisabled();
-        }
-        ImGui.EndDisabled();
         if (controller.Rows.Count == 0) return;
-        if (ImGui.BeginTable("##existingPrices", 9, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY
+        if (ImGui.BeginTable("##existingPrices", 8, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY
             | ImGuiTableFlags.Resizable, new Vector2(0, Math.Max(150, ImGui.GetContentRegionAvail().Y - 30))))
         {
-            ImGui.TableSetupColumn("Use", ImGuiTableColumnFlags.WidthFixed, 34);
             ImGui.TableSetupColumn("Item");
             ImGui.TableSetupColumn("Qty", ImGuiTableColumnFlags.WidthFixed, 45);
             ImGui.TableSetupColumn("Current", ImGuiTableColumnFlags.WidthFixed, 74);
-            ImGui.TableSetupColumn("Suggested", ImGuiTableColumnFlags.WidthFixed, 74);
+            ImGui.TableSetupColumn("Target", ImGuiTableColumnFlags.WidthFixed, 74);
             ImGui.TableSetupColumn("Source", ImGuiTableColumnFlags.WidthFixed, 90);
             ImGui.TableSetupColumn("Age", ImGuiTableColumnFlags.WidthFixed, 55);
             ImGui.TableSetupColumn("Result");
@@ -139,11 +139,6 @@ internal sealed class MainWindow : Window
             {
                 ImGui.PushID(row.Item.Slot);
                 ImGui.TableNextRow();
-                ImGui.TableNextColumn();
-                ImGui.BeginDisabled(controller.Busy || row.Proposal is not { CanApply: true });
-                var selected = row.Selected;
-                if (ImGui.Checkbox("##selected", ref selected)) row.Selected = selected;
-                ImGui.EndDisabled();
                 ImGui.TableNextColumn(); ImGui.TextWrapped(row.Item.Name + (row.Item.IsHq ? " (HQ)" : ""));
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Item.Quantity.ToString("N0"));
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Item.CurrentPrice.ToString("N0"));
@@ -164,8 +159,6 @@ internal sealed class MainWindow : Window
     private void DrawSettings()
     {
         ImGui.BeginDisabled(controller.Busy);
-        var lowerOnly = config.OnlyLowerExistingPrices;
-        if (ImGui.Checkbox("Only lower existing prices", ref lowerOnly)) { config.OnlyLowerExistingPrices = lowerOnly; save(); }
         var minimum = config.MinimumPrice;
         ImGui.SetNextItemWidth(160);
         if (ImGui.InputInt("Minimum price per item (gil)", ref minimum))
@@ -261,15 +254,11 @@ internal sealed class MainWindow : Window
     {
         ImGui.Separator();
         ImGui.TextUnformatted("Captured items");
-        ImGui.TextWrapped("Open a retainer's selling list, then click Start listing items once. It snapshots carried inventory, skips untradeable, nonmarketable, and excluded items, then uses local marketboard prices to list eligible stacks one gil below the lowest matching listing. It confirms each sale and stops when inventory is done or the retainer's 20 slots are full. Use Stop to halt the batch.");
+        ImGui.TextWrapped("Open a retainer's selling list and use Start listing items above. It snapshots carried inventory, skips untradeable, nonmarketable, and excluded items, checks live local prices, and confirms each eligible sale one gil below the lowest matching listing. It stops when inventory is done or all 20 retainer slots are full. Use Stop to halt the batch.");
         ImGui.BeginDisabled(controller.Busy);
         if (ImGui.Button("Snapshot inventory")) dispatch(controller.SnapshotInventory);
         ImGui.SameLine();
         if (ImGui.Button("Snapshot retainer listings")) dispatch(controller.SnapshotListedItems);
-        ImGui.EndDisabled();
-        ImGui.SameLine();
-        ImGui.BeginDisabled(controller.Busy || !controller.CanStartListingItems);
-        if (ImGui.Button("Start listing items")) dispatch(controller.StartListingItems);
         ImGui.EndDisabled();
         if (controller.StartListingAvailabilityError is { } listingAvailabilityError)
             ImGui.TextWrapped(listingAvailabilityError);
