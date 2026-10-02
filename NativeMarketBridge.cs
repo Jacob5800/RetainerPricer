@@ -80,25 +80,12 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         {
             try
             {
-                // FFXIVClientStructs' AgentRetainer.OpenRetainerSell call-site signature. Multiple call sites
-                // are acceptable only when every one resolves to the same target inside the game text section.
+                // Use the FFXIVClientStructs AgentRetainer.OpenRetainerSell call-site signature and Dalamud's
+                // standard ScanText resolver, which follows the E8 call to its target. ScanAllText can find
+                // additional callers that share this pattern and reject a valid client when their targets differ.
                 const string openSellCall = "E8 ?? ?? ?? ?? EB ?? 48 83 BF ?? ?? ?? ?? ?? 74 ?? 8B CE";
-                var matches = scanner.ScanAllText(openSellCall);
-                nint? resolvedTarget = null;
-                var allTargetsVerified = matches.Length > 0;
-                foreach (var match in matches)
-                {
-                    if (*(byte*)match != 0xE8) { allTargetsVerified = false; break; }
-                    var relativeOffset = *(int*)(match + 1);
-                    var target = scanner.ResolveRelativeAddress(match + 5, relativeOffset);
-                    var textStart = scanner.TextSectionBase;
-                    if (target < textStart || target >= textStart + scanner.TextSectionSize ||
-                        resolvedTarget is { } previous && previous != target)
-                    { allTargetsVerified = false; break; }
-                    resolvedTarget ??= target;
-                }
-                if (allTargetsVerified && resolvedTarget is { } verifiedTarget)
-                    openRetainerSell = Marshal.GetDelegateForFunctionPointer<OpenRetainerSellDelegate>(verifiedTarget);
+                var target = scanner.ScanText(openSellCall);
+                openRetainerSell = Marshal.GetDelegateForFunctionPointer<OpenRetainerSellDelegate>(target);
             }
             catch (Exception ex) { log.Warning(ex, "Retainer stock-opening callback is not available on this game build."); }
         }
