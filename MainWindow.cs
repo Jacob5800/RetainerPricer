@@ -22,6 +22,7 @@ internal sealed class MainWindow : Window
     private string exceptionSearch = "";
     private string exceptionSearchCache = "";
     private List<ItemChoice> exceptionMatches = [];
+    private ItemChoice? exceptionSelection;
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
         Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
@@ -102,6 +103,7 @@ internal sealed class MainWindow : Window
             if (ImGui.BeginTabItem("New / selected item")) { DrawCurrent(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Price lookup")) { DrawManualLookup(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Existing listings")) { DrawExisting(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("Exceptions")) { DrawExceptions(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Settings")) { DrawSettings(); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
         }
@@ -200,7 +202,6 @@ internal sealed class MainWindow : Window
         if (ImGui.Checkbox("Open this window with the retainer selling list", ref open)) { config.OpenWithRetainer = open; save(); }
         ImGui.EndDisabled();
         ImGui.Separator();
-        DrawExceptions();
         ImGui.TextWrapped("Prices are per item, before tax. If an undercut would be below your minimum, or no matching competitor is available, that item is left unchanged.");
         ImGui.TextWrapped("Closing the retainer or changing character/world stops a batch. Stop prevents further submissions; completed price changes stay applied.");
     }
@@ -378,43 +379,90 @@ internal sealed class MainWindow : Window
 
     private void DrawExceptions()
     {
-        ImGui.TextUnformatted("Item exceptions");
-        ImGui.TextWrapped("Excluded items are skipped during automatic new-listing pricing and existing-listing scans. Manual price lookups remain available.");
-        ImGui.SetNextItemWidth(360);
-        ImGui.InputText("Find an item to exclude", ref exceptionSearch, 128);
-        RefreshMatches(exceptionSearch, ref exceptionSearchCache, ref exceptionMatches);
-        if (!string.IsNullOrWhiteSpace(exceptionSearch))
+        ImGui.TextUnformatted("Exception list");
+        ImGui.TextWrapped("Excluded items are always skipped by automatic listing and existing-listing updates. Untradeable and nonmarketable items are omitted automatically. Manual price lookups remain available.");
+
+        ImGui.BeginDisabled(controller.Busy);
+        if (ImGui.Button(controller.ExceptionInventorySnapshotAt is null ? "Grab carried inventory" : "Refresh carried inventory"))
+            dispatch(controller.SnapshotExceptionInventory);
+        ImGui.EndDisabled();
+        if (controller.ExceptionInventorySnapshotError is { } inventoryError)
+            ImGui.TextWrapped(inventoryError);
+        else if (controller.ExceptionInventorySnapshotAt is { } snapshotAt)
         {
-            foreach (var candidate in exceptionMatches)
+            ImGui.TextUnformatted($"Inventory snapshot · {controller.ExceptionInventoryCandidates.Count} marketable stack(s) · {snapshotAt:HH:mm:ss}");
+            ImGui.TextDisabled($"{controller.ExceptionInventoryUnmarketableSkipped} untradeable or nonmarketable stack(s) omitted.");
+        }
+        else
+            ImGui.TextDisabled("Grab carried inventory to populate the picker, or search the full item list below.");
+
+        ImGui.SetNextItemWidth(360);
+        ImGui.InputText("Filter item names", ref exceptionSearch, 128);
+        if (!StringComparer.CurrentCultureIgnoreCase.Equals(exceptionSearch, exceptionSearchCache))
+            exceptionSelection = null;
+        RefreshMatches(exceptionSearch, ref exceptionSearchCache, ref exceptionMatches);
+
+        var inventoryItems = controller.ExceptionInventoryCandidates
+            .GroupBy(item => item.ItemId)
+            .Select(group => new ItemChoice(group.Key, group.First().Name))
+            .ToList();
+        var pickerItems = inventoryItems.Concat(exceptionMatches)
+            .GroupBy(item => item.ItemId).Select(group => group.First()).ToList();
+        var preview = exceptionSelection is { } selected
+            ? $"{selected.Name}  ·  #{selected.ItemId}"
+            : "Select an inventory or matching item...";
+        ImGui.SetNextItemWidth(420);
+        if (ImGui.BeginCombo("Item to exclude", preview))
+        {
+            if (pickerItems.Count == 0)
+                ImGui.TextDisabled(exceptionSearch.Trim().Length < 2
+                    ? "Enter at least two characters to search the item list."
+                    : "No inventory items or matching item names found.");
+            foreach (var candidate in pickerItems)
             {
-                if (config.ExcludedItemIds.Contains(candidate.ItemId)) continue;
-                ImGui.PushID((int)candidate.ItemId);
-                ImGui.TextUnformatted($"{candidate.Name}  ·  #{candidate.ItemId}");
+                var alreadyExcluded = config.ExcludedItemIds.Contains(candidate.ItemId);
+                var label = $"{candidate.Name}  ·  #{candidate.ItemId}" + (alreadyExcluded ? " (excluded)" : "");
+                ImGui.BeginDisabled(alreadyExcluded);
+                if (ImGui.Selectable(label, exceptionSelection?.ItemId == candidate.ItemId))
+                    exceptionSelection = candidate;
+                ImGui.EndDisabled();
+            }
+            ImGui.EndCombo();
+        }
+        var canAddException = exceptionSelection is { } choice && !config.ExcludedItemIds.Contains(choice.ItemId);
+        ImGui.BeginDisabled(controller.Busy || !canAddException);
+        if (ImGui.Button("Add to exceptions") && exceptionSelection is { } addChoice)
+        {
+            AddExclusion(addChoice.ItemId);
+            exceptionSelection = null;
+        }
+        ImGui.EndDisabled();
+
+        ImGui.Separator();
+        ImGui.TextUnformatted($"Excluded items · {config.ExcludedItemIds.Count}");
+        if (config.ExcludedItemIds.Count == 0) { ImGui.TextDisabled("No item exceptions yet."); return; }
+        if (ImGui.BeginChild("##exceptionList", new Vector2(0, 220), true))
+        {
+            foreach (var itemId in config.ExcludedItemIds.ToArray())
+            {
+                var name = itemChoices.FirstOrDefault(x => x.ItemId == itemId)?.Name
+                    ?? controller.ExceptionInventoryCandidates.FirstOrDefault(x => x.ItemId == itemId)?.Name
+                    ?? $"Item {itemId}";
+                ImGui.PushID((int)itemId);
+                ImGui.TextUnformatted($"{name}  ·  #{itemId}");
                 ImGui.SameLine();
-                if (ImGui.SmallButton("Add exception"))
+                ImGui.BeginDisabled(controller.Busy);
+                if (ImGui.SmallButton("Remove"))
                 {
-                    config.ExcludedItemIds.Add(candidate.ItemId);
+                    config.ExcludedItemIds.Remove(itemId);
                     config.Normalize();
                     save();
                 }
+                ImGui.EndDisabled();
                 ImGui.PopID();
             }
         }
-        if (config.ExcludedItemIds.Count == 0) { ImGui.TextDisabled("No item exceptions."); return; }
-        ImGui.TextUnformatted("Excluded:");
-        foreach (var itemId in config.ExcludedItemIds.ToArray())
-        {
-            var name = itemChoices.FirstOrDefault(x => x.ItemId == itemId)?.Name ?? $"Item {itemId}";
-            ImGui.PushID((int)itemId);
-            ImGui.TextUnformatted(name);
-            ImGui.SameLine();
-            if (ImGui.SmallButton("Remove"))
-            {
-                config.ExcludedItemIds.Remove(itemId);
-                save();
-            }
-            ImGui.PopID();
-        }
+        ImGui.EndChild();
     }
 
     private void RefreshMatches(string query, ref string previousQuery, ref List<ItemChoice> results)

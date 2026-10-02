@@ -11,7 +11,7 @@ internal sealed class PriceRow(SellItem item)
 internal sealed class PricingController : IDisposable
 {
     private enum Work { Idle, Single, Manual, Scan, BatchListing }
-    private enum Step { Start, Opening, Quote, Closing, Confirming }
+    private enum Step { Start, Opening, WaitingToCompare, Quote, Closing, ClosingListingCompare, ClosingSkippedCompare, ClosingSkippedSell, Confirming }
     private readonly NativeMarketBridge bridge;
     private readonly UniversalisClient universalis;
     private readonly PluginConfig config;
@@ -25,6 +25,7 @@ internal sealed class PricingController : IDisposable
     private long seenDialog = -1;
     private DateTimeOffset nextTick;
     private DateTimeOffset deadline;
+    private string? pendingSkipMessage;
     private SellItem? workingItem;
     private ManualQuoteTarget? manualTarget;
     private MarketSession? session;
@@ -53,14 +54,18 @@ internal sealed class PricingController : IDisposable
     public PriceProposal? ManualProposal { get; private set; }
     public string? ManualQuoteWarning { get; private set; }
     public List<CarriedItemCandidate> InventoryCandidates { get; } = [];
+    public List<CarriedItemCandidate> ExceptionInventoryCandidates { get; } = [];
     public List<SellItem> ListedCandidates { get; } = [];
     public DateTimeOffset? InventorySnapshotAt { get; private set; }
+    public DateTimeOffset? ExceptionInventorySnapshotAt { get; private set; }
     public DateTimeOffset? ListedSnapshotAt { get; private set; }
     public int InventoryExceptionSkipped { get; private set; }
     public int InventoryUnmarketableSkipped { get; private set; }
+    public int ExceptionInventoryUnmarketableSkipped { get; private set; }
     public int ListedExceptionSkipped { get; private set; }
     public int ListedUnmarketableSkipped { get; private set; }
     public string? InventorySnapshotError { get; private set; }
+    public string? ExceptionInventorySnapshotError { get; private set; }
     public string? ListedSnapshotError { get; private set; }
     public List<PriceRow> Rows { get; } = [];
     public bool Busy => work != Work.Idle;
@@ -185,6 +190,21 @@ internal sealed class PricingController : IDisposable
         workSource = PriceSource.Local;
         work = Work.BatchListing;
         Status = $"Automatically listing {batchCandidates.Count} eligible stack(s) using the local marketboard. Each price is checked before the game's Confirm action.";
+    }
+
+    public void SnapshotExceptionInventory()
+    {
+        if (Busy) return;
+        // Include already-excluded items so the user can find, inspect, and remove them in this tab.
+        var items = bridge.ReadCarriedInventory(marketableItemIds, new HashSet<uint>(),
+            out _, out var unmarketableSkipped, out var error);
+        ExceptionInventoryCandidates.Clear();
+        ExceptionInventoryCandidates.AddRange(items);
+        ExceptionInventoryUnmarketableSkipped = unmarketableSkipped;
+        ExceptionInventorySnapshotError = error.Length == 0 ? null : error;
+        ExceptionInventorySnapshotAt = error.Length == 0 ? DateTimeOffset.Now : null;
+        Status = error.Length != 0 ? error :
+            $"Exception inventory ready: {items.Count} marketable stack(s), {unmarketableSkipped} untradeable or nonmarketable stack(s) omitted.";
     }
 
     public bool OpenInventoryItem(CarriedItemCandidate item)
@@ -441,7 +461,7 @@ internal sealed class PricingController : IDisposable
             listingCandidate = candidate;
             preListingSlots = listedBefore.Select(row => row.Slot).ToHashSet();
             if (!bridge.TryOpenInventoryItem(candidate, out var openError))
-            { SkipBatchItem($"Skipped {candidate.Name}: {openError}"); return; }
+            { Cancel($"Automatic listing stopped before opening {candidate.Name}: {openError}"); return; }
             workingItem = null;
             deadline = now.AddSeconds(8);
             step = Step.Opening;
@@ -452,7 +472,7 @@ internal sealed class PricingController : IDisposable
         {
             if (!bridge.TryReadSellItem(out var opened, out _))
             {
-                if (now > deadline) SkipBatchItem("The next item sale window did not open in time.");
+                if (now > deadline) Cancel("Automatic listing stopped because the next item sale window did not open in time. No item was skipped; check the retainer UI before retrying.");
                 return;
             }
             if (listingCandidate is not { } expected || opened.IsExisting || opened.ItemId != expected.ItemId ||
@@ -461,7 +481,44 @@ internal sealed class PricingController : IDisposable
 
             workingItem = opened;
             if (!StartRequest(opened, now, out var requestError))
-            { SkipBatchItem($"Skipped {opened.Name}: {requestError}"); return; }
+            {
+                if (requestError.Contains("previous marketboard search is still finishing", StringComparison.OrdinalIgnoreCase))
+                {
+                    deadline = now.AddSeconds(20);
+                    step = Step.WaitingToCompare;
+                    Status = $"Waiting for the previous marketboard response before checking {opened.Name}...";
+                    return;
+                }
+                SkipBatchItem($"Skipped {opened.Name}: {requestError}");
+                return;
+            }
+            step = Step.Quote;
+            return;
+        }
+
+        if (step == Step.WaitingToCompare)
+        {
+            if (workingItem is not { } waitingItem || listingCandidate is null)
+            { Cancel("Automatic listing stopped because the item waiting for a price check was lost."); return; }
+            if (!bridge.TryReadSellItem(out var current, out _) || !SameDialog(waitingItem, current))
+            { Cancel("Automatic listing stopped because the item sale window changed while the marketboard response was finishing."); return; }
+            if (bridge.IsComparisonVisible)
+            { Cancel("Automatic listing paused because a market comparison is still open. Close it before starting the batch again."); return; }
+            if (bridge.IsLocalSearchBusy)
+            {
+                if (now > deadline) Cancel("Automatic listing stopped because the previous marketboard response did not finish. Close any market comparison and retry.");
+                return;
+            }
+            if (!StartRequest(current, now, out var retryError))
+            {
+                if (retryError.Contains("previous marketboard search is still finishing", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (now > deadline) Cancel("Automatic listing stopped because the previous marketboard response did not finish. Close any market comparison and retry.");
+                    return;
+                }
+                SkipBatchItem($"Skipped {current.Name}: {retryError}");
+                return;
+            }
             step = Step.Quote;
             return;
         }
@@ -481,11 +538,56 @@ internal sealed class PricingController : IDisposable
             { Cancel($"Automatic listing stopped before confirming {current.Name}: {closeError}"); return; }
 
             listingSubmittedPrice = proposal.SuggestedPrice;
-            if (!bridge.TryConfirmNewListing(current, listingSubmittedPrice, out var confirmError))
-            { Cancel($"Automatic listing stopped before confirming {current.Name}: {confirmError}"); return; }
-            Status = $"Submitted {current.Name} at {listingSubmittedPrice:N0} gil each. Waiting for the retainer list to confirm it.";
+            deadline = now.AddSeconds(8);
+            step = Step.ClosingListingCompare;
+            Status = $"Got a price for {current.Name}. Closing the comparison before confirming the sale.";
+            return;
+        }
+
+        if (step == Step.ClosingListingCompare)
+        {
+            if (bridge.IsComparisonVisible || bridge.IsLocalSearchBusy)
+            {
+                if (now > deadline) Cancel("Automatic listing stopped because the market comparison did not close safely. No sale was confirmed.");
+                return;
+            }
+            if (workingItem is not { } current || !bridge.TryReadSellItem(out var open, out _) || !SameDialog(current, open))
+            { Cancel("Automatic listing stopped because the sale window changed before confirmation. No sale was submitted."); return; }
+            if (!bridge.TryConfirmNewListing(open, listingSubmittedPrice, out var confirmError))
+            { Cancel($"Automatic listing stopped before confirming {open.Name}: {confirmError}"); return; }
+            Status = $"Submitted {open.Name} at {listingSubmittedPrice:N0} gil each. Waiting for the retainer list to confirm it.";
             deadline = now.AddSeconds(12);
             step = Step.Confirming;
+            return;
+        }
+
+        if (step == Step.ClosingSkippedCompare)
+        {
+            if (bridge.IsComparisonVisible || bridge.IsLocalSearchBusy)
+            {
+                if (now > deadline) Cancel("Automatic listing stopped because the skipped item's market comparison did not close. Close it manually before retrying.");
+                return;
+            }
+            if (workingItem is { } skipped && bridge.IsSellWindowVisible)
+            {
+                if (!bridge.TryClosePriceWindows(skipped, out var closeError))
+                { Cancel($"Automatic listing stopped while closing the skipped item: {closeError}"); return; }
+                step = Step.ClosingSkippedSell;
+                deadline = now.AddSeconds(8);
+                return;
+            }
+            CompleteSkippedBatchItem(now);
+            return;
+        }
+
+        if (step == Step.ClosingSkippedSell)
+        {
+            if (bridge.IsSellWindowVisible)
+            {
+                if (now > deadline) Cancel("Automatic listing stopped because the skipped item's sale window did not close. Close it manually before retrying.");
+                return;
+            }
+            CompleteSkippedBatchItem(now);
             return;
         }
 
@@ -518,16 +620,32 @@ internal sealed class PricingController : IDisposable
 
     private void SkipBatchItem(string message)
     {
-        if (workingItem is { } openItem && !bridge.TryClosePriceWindows(openItem, out var closeError))
-        { Cancel($"Automatic listing stopped while closing the skipped item: {closeError}"); return; }
+        pendingSkipMessage = message;
+        ResetRequest();
+        if (workingItem is { } openItem && bridge.IsSellWindowVisible)
+        {
+            if (bridge.IsComparisonVisible && !bridge.TryCloseCompare(openItem, out var closeError))
+            { Cancel($"Automatic listing stopped while closing the skipped item's comparison: {closeError}"); return; }
+            deadline = DateTimeOffset.UtcNow.AddSeconds(8);
+            step = Step.ClosingSkippedCompare;
+            Status = $"{message} Closing its price windows before continuing.";
+            return;
+        }
+        CompleteSkippedBatchItem(DateTimeOffset.UtcNow);
+    }
+
+    private void CompleteSkippedBatchItem(DateTimeOffset now)
+    {
+        var message = pendingSkipMessage ?? "Skipped item; continuing.";
         listingSkipped++;
         index++;
         listingCandidate = null;
         workingItem = null;
+        pendingSkipMessage = null;
         step = Step.Start;
         ResetRequest();
         Status = message;
-        nextTick = DateTimeOffset.UtcNow.AddMilliseconds(650);
+        nextTick = now.AddMilliseconds(650);
     }
 
     private void FinishBatchListing(string message)

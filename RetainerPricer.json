@@ -2,7 +2,7 @@
   "Author": "Jacob5800",
   "Name": "Retainer Pricer",
   "InternalName": "RetainerPricer",
-  "AssemblyVersion": "0.1.7.0",
+  "AssemblyVersion": "0.1.8.0",
   "Description": "Automatically price eligible inventory and reprice existing listings one gil below matching competition using live local marketboard data. Persistent item exclusions remain user controlled.",
   "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
   "ApplicableVersion": "any",

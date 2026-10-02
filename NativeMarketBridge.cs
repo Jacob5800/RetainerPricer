@@ -58,6 +58,16 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     public string? LocalAvailabilityError { get; private set; }
     public string? RetainerAvailabilityError { get; private set; }
     public string? ItemSelectorAvailabilityError { get; private set; }
+    public bool IsComparisonVisible => IsAddonVisible("ItemSearchResult");
+    public bool IsSellWindowVisible => GetSellAddon() != null;
+    public bool IsLocalSearchBusy
+    {
+        get
+        {
+            var proxy = InfoProxyItemSearch.Instance();
+            return proxy != null && proxy->WaitingForListings;
+        }
+    }
 
     public MarketWorld? GetHomeWorld()
     {
@@ -429,9 +439,19 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         if (!MatchesCurrentDialog(expected, true, out _, out error)) return false;
         var proxy = InfoProxyItemSearch.Instance();
         var addon = GetSellAddon();
-        if (proxy == null || proxy->WaitingForListings || IsAddonReady("ItemSearchResult") || addon == null)
+        if (proxy == null || addon == null)
         {
-            error = "Wait for or close the current market comparison before starting another.";
+            error = "The marketboard search is not available.";
+            return false;
+        }
+        if (proxy->WaitingForListings)
+        {
+            error = "The previous marketboard search is still finishing.";
+            return false;
+        }
+        if (IsComparisonVisible)
+        {
+            error = "A market comparison is already open. Close it before continuing.";
             return false;
         }
         compareItem = expected;
@@ -470,7 +490,7 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     {
         if (!MatchesCurrentDialog(expected, false, out _, out error)) return false;
         var comparison = (AtkUnitBase*)gameGui.GetAddonByName("ItemSearchResult").Address;
-        if (comparison == null || !comparison->IsReady) { error = string.Empty; return true; }
+        if (comparison == null || !comparison->IsReady || !comparison->IsVisible) { error = string.Empty; return true; }
         var search = AgentItemSearch.Instance();
         if (compareItem == null || !SameStock(compareItem, expected) ||
             compareItem.DialogGeneration != expected.DialogGeneration || search == null ||
@@ -533,6 +553,12 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     {
         var addon = (AtkUnitBase*)gameGui.GetAddonByName(name).Address;
         return addon != null && addon->IsReady;
+    }
+
+    private bool IsAddonVisible(string name)
+    {
+        var addon = (AtkUnitBase*)gameGui.GetAddonByName(name).Address;
+        return addon != null && addon->IsReady && addon->IsVisible;
     }
 
     private bool MatchesCurrentDialog(SellItem expected, bool requireSamePrice, out SellItem current, out string error)
