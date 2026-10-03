@@ -49,7 +49,7 @@ internal sealed class MainWindow : Window
         if (retainerError() is { } nativeError) ImGui.TextWrapped(nativeError);
         var busy = controller.Busy;
         ImGui.BeginDisabled(busy);
-        if (controller.IsListingItemsRunning)
+        if (controller.IsListingItemsRunning && !controller.IsBatchSellingOnlyRunning)
         {
             ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.12f, 0.48f, 0.2f, 1));
             ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.16f, 0.58f, 0.25f, 1));
@@ -68,6 +68,16 @@ internal sealed class MainWindow : Window
             ImGui.PopStyleColor(3);
         }
         else if (ImGui.Button("Update existing listings")) dispatch(controller.UpdateExistingListings);
+        ImGui.SameLine();
+        if (controller.IsBatchSellingOnlyRunning)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.12f, 0.48f, 0.2f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.16f, 0.58f, 0.25f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.09f, 0.4f, 0.16f, 1));
+            ImGui.Button("Batch selling only...");
+            ImGui.PopStyleColor(3);
+        }
+        else if (ImGui.Button("Start batch selling only")) dispatch(controller.StartBatchSellingOnly);
         ImGui.EndDisabled();
         if (busy)
         {
@@ -78,7 +88,7 @@ internal sealed class MainWindow : Window
             if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
             ImGui.PopStyleColor(3);
         }
-        ImGui.TextDisabled("Start listing items prices eligible carried inventory. Items on the Batch selling tab are split into smaller listings; all other items stay as full stacks. Update existing listings reprices current stock. Both use Universalis and require a recent sale.");
+        ImGui.TextDisabled("Start listing items processes all eligible carried inventory, splitting configured items. Start batch selling only processes just the items on the Batch selling tab. Update existing listings reprices current stock.");
         if (controller.Busy)
             ImGui.TextDisabled("The active listing task is highlighted. Stop cancels it; changes already submitted remain applied.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
@@ -304,7 +314,7 @@ internal sealed class MainWindow : Window
     {
         ImGui.Separator();
         ImGui.TextUnformatted("Captured items");
-        ImGui.TextWrapped("Open a retainer's selling list and use Start listing items above. It snapshots carried inventory, skips untradeable, nonmarketable, and excluded items, checks live local prices, and confirms each eligible sale one gil below the lowest matching listing. It stops when inventory is done or all 20 retainer slots are full. Use Stop to halt the batch.");
+        ImGui.TextWrapped("Open a retainer's selling list and use Start listing items or Start batch selling only above. The first processes all eligible carried inventory; the second processes only items in the Batch selling tab. Both skip untradeable, nonmarketable, and excluded items and stop when the 20 listing slots are full. Use Stop to halt the batch.");
         ImGui.BeginDisabled(controller.Busy);
         if (ImGui.Button("Snapshot inventory")) dispatch(controller.SnapshotInventory);
         ImGui.SameLine();
@@ -494,7 +504,7 @@ internal sealed class MainWindow : Window
     private void DrawBatchSelling()
     {
         ImGui.TextUnformatted("Per-item batch sizes");
-        ImGui.TextWrapped("Only items on this list are split when Start listing items runs. Each listed stack is divided into listings no larger than that item's batch size; other items are listed as full stacks. Exclusions take priority. Existing listings are not split.");
+        ImGui.TextWrapped("Items on this list are split when Start listing items runs; items not on this list are listed as full stacks. Start batch selling only at the top processes only items on this list, using each item's batch size. Exclusions take priority. Existing listings are not split.");
 
         ImGui.BeginDisabled(controller.Busy);
         if (ImGui.Button(controller.ExceptionInventorySnapshotAt is null ? "Grab carried inventory" : "Refresh item picker"))

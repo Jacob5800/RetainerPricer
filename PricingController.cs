@@ -39,6 +39,7 @@ internal sealed class PricingController : IDisposable
     private uint requestedListingQuantity;
     private int listingSucceeded;
     private int listingSkipped;
+    private bool batchSellingOnly;
 
     private sealed record ManualQuoteTarget(ItemChoice Item, bool IsHq, MarketWorld World);
 
@@ -70,6 +71,7 @@ internal sealed class PricingController : IDisposable
     public List<PriceRow> Rows { get; } = [];
     public bool Busy => work != Work.Idle;
     public bool IsListingItemsRunning => work == Work.BatchListing;
+    public bool IsBatchSellingOnlyRunning => work == Work.BatchListing && batchSellingOnly;
     public bool IsUpdatingListings => work == Work.Scan;
     public bool CanUpdateExisting => bridge.RetainerAvailabilityError is null;
     public bool CanApplyExisting => CanUpdateExisting && bridge.ItemSelectorAvailabilityError is null;
@@ -165,7 +167,11 @@ internal sealed class PricingController : IDisposable
             $"Retainer listing snapshot ready: {ListedCandidates.Count} marketable item(s), {ListedExceptionSkipped} excluded, {ListedUnmarketableSkipped} not marketable.";
     }
 
-    public void StartListingItems()
+    public void StartListingItems() => StartListingItems(batchOnly: false);
+
+    public void StartBatchSellingOnly() => StartListingItems(batchOnly: true);
+
+    private void StartListingItems(bool batchOnly)
     {
         if (Busy) return;
         if (!CanStartListingItems)
@@ -182,8 +188,17 @@ internal sealed class PricingController : IDisposable
         SnapshotInventory();
         if (InventorySnapshotError is { } snapshotError) { Status = snapshotError; return; }
         if (InventoryCandidates.Count == 0) { Status = "No eligible items in carried inventory. Excluded and unmarketable items are skipped."; return; }
+        var candidates = batchOnly
+            ? InventoryCandidates.Where(item => config.BatchSaleQuantities.ContainsKey(item.ItemId)).ToList()
+            : InventoryCandidates.ToList();
+        if (batchOnly && candidates.Count == 0)
+        {
+            Status = "No configured Batch selling items were found in carried inventory. Add items in the Batch selling tab, and make sure they are not excluded.";
+            return;
+        }
         session = active;
-        batchCandidates = InventoryCandidates.ToList();
+        batchCandidates = candidates;
+        batchSellingOnly = batchOnly;
         index = 0;
         listingSucceeded = 0;
         listingSkipped = 0;
@@ -192,7 +207,8 @@ internal sealed class PricingController : IDisposable
         step = Step.Start;
         workSource = PriceSource.Universalis;
         work = Work.BatchListing;
-        Status = $"Automatically listing {batchCandidates.Count} eligible stack(s) using Universalis. Each item needs a current competing listing and a sale from the last 20 days.";
+        var scope = batchOnly ? "configured Batch selling item stack(s) only" : "eligible stack(s)";
+        Status = $"Automatically listing {batchCandidates.Count} {scope} using Universalis. Each item needs a current competing listing and a sale from the last 20 days.";
     }
 
     public void SnapshotExceptionInventory()
@@ -686,6 +702,7 @@ internal sealed class PricingController : IDisposable
     private void FinishBatchListing(string message)
     {
         work = Work.Idle;
+        batchSellingOnly = false;
         workingItem = null;
         listingCandidate = null;
         batchCandidates.Clear();
@@ -785,6 +802,7 @@ internal sealed class PricingController : IDisposable
         if (wasBatchListing)
         {
             batchCandidates.Clear();
+            batchSellingOnly = false;
             listingCandidate = null;
             workingItem = null;
         }
