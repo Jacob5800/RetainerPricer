@@ -40,6 +40,8 @@ internal sealed class PricingController : IDisposable
     private int listingSucceeded;
     private int listingSkipped;
     private bool batchSellingOnly;
+    private readonly Dictionary<uint, uint> batchSoldQuantitiesByItemId = [];
+    private readonly HashSet<uint> batchMaximumReachedItemIds = [];
 
     private sealed record ManualQuoteTarget(ItemChoice Item, bool IsHq, MarketWorld World);
 
@@ -204,6 +206,8 @@ internal sealed class PricingController : IDisposable
         listingSkipped = 0;
         listingCandidate = null;
         requestedListingQuantity = 0;
+        batchSoldQuantitiesByItemId.Clear();
+        batchMaximumReachedItemIds.Clear();
         step = Step.Start;
         workSource = PriceSource.Universalis;
         work = Work.BatchListing;
@@ -471,10 +475,23 @@ internal sealed class PricingController : IDisposable
             if (!marketableItemIds.Contains(candidate.ItemId) || IsExcluded(candidate.ItemId))
             { SkipBatchItem("Skipped an item that is now excluded or not marketable."); return; }
 
+            var maxTotal = batchSellingOnly ? config.BatchSaleMaxQuantities.GetValueOrDefault(candidate.ItemId) : 0;
+            var alreadySold = batchSoldQuantitiesByItemId.GetValueOrDefault(candidate.ItemId);
+            if (maxTotal > 0 && alreadySold >= maxTotal)
+            {
+                if (batchMaximumReachedItemIds.Add(candidate.ItemId))
+                    Status = $"Reached the {maxTotal:N0}-item total for {candidate.Name}; leaving remaining inventory untouched.";
+                index++;
+                nextTick = now.AddMilliseconds(250);
+                return;
+            }
+
             listingCandidate = candidate;
-            requestedListingQuantity = config.BatchSaleQuantities.TryGetValue(candidate.ItemId, out var batchSize)
+            var perListing = config.BatchSaleQuantities.TryGetValue(candidate.ItemId, out var batchSize)
                 ? Math.Min(batchSize, candidate.Quantity)
                 : candidate.Quantity;
+            var remainingTotal = maxTotal > 0 ? maxTotal - alreadySold : candidate.Quantity;
+            requestedListingQuantity = Math.Min(perListing, remainingTotal);
             preListingSlots = listedBefore.Select(row => row.Slot).ToHashSet();
             if (!bridge.TryOpenInventoryItem(candidate, out var openError))
             { Cancel($"Automatic listing stopped before opening {candidate.Name}: {openError}"); return; }
@@ -629,6 +646,8 @@ internal sealed class PricingController : IDisposable
                     && row.ItemId == expected.ItemId && row.IsHq == expected.IsHq
                     && row.Quantity == submitted.Quantity && row.CurrentPrice == listingSubmittedPrice))
             {
+                if (batchSellingOnly && config.BatchSaleMaxQuantities.TryGetValue(expected.ItemId, out var itemMaximum) && itemMaximum > 0)
+                    batchSoldQuantitiesByItemId[expected.ItemId] = batchSoldQuantitiesByItemId.GetValueOrDefault(expected.ItemId) + submitted.Quantity;
                 var remaining = expected.Quantity - submitted.Quantity;
                 if (remaining > 0)
                 {
@@ -706,6 +725,8 @@ internal sealed class PricingController : IDisposable
         workingItem = null;
         listingCandidate = null;
         batchCandidates.Clear();
+        batchSoldQuantitiesByItemId.Clear();
+        batchMaximumReachedItemIds.Clear();
         Status = message;
         ResetRequest();
     }
@@ -816,3 +837,4 @@ internal sealed class PricingController : IDisposable
 
     public void Dispose() { cancellation.Cancel(); cancellation.Dispose(); }
 }
+

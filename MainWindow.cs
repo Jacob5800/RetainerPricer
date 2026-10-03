@@ -29,6 +29,8 @@ internal sealed class MainWindow : Window
     private List<ItemChoice> batchMatches = [];
     private ItemChoice? batchSelection;
     private int batchQuantityInput = 10;
+    private int batchMaximumTotalInput;
+    private string? batchBulkAddMessage;
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
         Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
@@ -136,6 +138,12 @@ internal sealed class MainWindow : Window
             if (ImGui.BeginTabItem("Settings")) { DrawSettings(); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
         }
+
+        var version = typeof(MainWindow).Assembly.GetName().Version;
+        var versionLabel = version is null ? "Version unavailable" : $"v{version.Major}.{version.Minor}.{Math.Max(version.Build, 0)}";
+        ImGui.SetCursorPos(new Vector2(ImGui.GetStyle().WindowPadding.X,
+            ImGui.GetWindowHeight() - ImGui.GetStyle().WindowPadding.Y - ImGui.GetTextLineHeight()));
+        ImGui.TextDisabled(versionLabel);
     }
 
     private void DrawCurrent()
@@ -549,7 +557,7 @@ internal sealed class MainWindow : Window
     private void DrawBatchSelling()
     {
         ImGui.TextUnformatted("Per-item batch sizes");
-        ImGui.TextWrapped("Items on this list are split when Start listing items runs; items not on this list are listed as full stacks. Start batch selling only at the top processes only items on this list, using each item's batch size. Exclusions take priority. Existing listings are not split.");
+        ImGui.TextWrapped("Set a maximum per listing and, for batch-only runs, an optional total limit per item. For example, per listing 5 and total 20 lists no more than 20 items in four batches. A total of 0 means unlimited. Start listing items still processes all inventory, using the per-listing size. Exclusions take priority. Existing listings are not split.");
 
         ImGui.BeginDisabled(controller.Busy);
         if (ImGui.Button(controller.ExceptionInventorySnapshotAt is null ? "Grab carried inventory" : "Refresh item picker"))
@@ -596,16 +604,27 @@ internal sealed class MainWindow : Window
         ImGui.SetNextItemWidth(140);
         ImGui.InputInt("Maximum items per listing", ref batchQuantityInput);
         batchQuantityInput = Math.Clamp(batchQuantityInput, 1, 9_999);
+        ImGui.SetNextItemWidth(180);
+        ImGui.InputInt("Maximum total to list per run (0 = unlimited)", ref batchMaximumTotalInput);
+        batchMaximumTotalInput = Math.Clamp(batchMaximumTotalInput, 0, 999_999_999);
         var canAddBatchItem = batchSelection is { } choice && !config.BatchSaleQuantities.ContainsKey(choice.ItemId);
         ImGui.BeginDisabled(controller.Busy || !canAddBatchItem);
         if (ImGui.Button("Add to batch list") && batchSelection is { } addChoice)
         {
             config.BatchSaleQuantities[addChoice.ItemId] = (uint)batchQuantityInput;
+            config.BatchSaleMaxQuantities[addChoice.ItemId] = (uint)batchMaximumTotalInput;
             config.Normalize();
             save();
             batchSelection = null;
         }
         ImGui.EndDisabled();
+        ImGui.SameLine();
+        ImGui.BeginDisabled(controller.Busy);
+        if (ImGui.Button("Add current inventory"))
+            dispatch(AddCurrentInventoryToBatchSelling);
+        ImGui.EndDisabled();
+        if (batchBulkAddMessage is { Length: > 0 } bulkMessage)
+            ImGui.TextDisabled(bulkMessage);
 
         ImGui.Separator();
         ImGui.TextUnformatted($"Items sold in batches · {config.BatchSaleQuantities.Count}");
@@ -614,10 +633,11 @@ internal sealed class MainWindow : Window
             ImGui.TextDisabled("No batch sizes set. Every item will be listed as one full stack.");
             return;
         }
-        if (!ImGui.BeginTable("##batchSaleItems", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+        if (!ImGui.BeginTable("##batchSaleItems", 4, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
                 ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable, new Vector2(0, 220))) return;
         ImGui.TableSetupColumn("Item");
         ImGui.TableSetupColumn("Max per listing", ImGuiTableColumnFlags.WidthFixed, 130);
+        ImGui.TableSetupColumn("Max total / run", ImGuiTableColumnFlags.WidthFixed, 130);
         ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 90);
         ImGui.TableSetupScrollFreeze(0, 1);
         ImGui.TableHeadersRow();
@@ -640,15 +660,55 @@ internal sealed class MainWindow : Window
                 save();
             }
             ImGui.TableNextColumn();
+            var maximumTotal = (int)Math.Min(config.BatchSaleMaxQuantities.GetValueOrDefault(entry.Key), 999_999_999);
+            ImGui.SetNextItemWidth(110);
+            if (ImGui.InputInt("##batchMaximumTotal", ref maximumTotal))
+            {
+                config.BatchSaleMaxQuantities[entry.Key] = (uint)Math.Clamp(maximumTotal, 0, 999_999_999);
+                config.Normalize();
+                save();
+            }
+            ImGui.TableNextColumn();
             if (ImGui.SmallButton("Remove"))
             {
                 config.BatchSaleQuantities.Remove(entry.Key);
+                config.BatchSaleMaxQuantities.Remove(entry.Key);
                 save();
             }
             ImGui.EndDisabled();
             ImGui.PopID();
         }
         ImGui.EndTable();
+    }
+
+    private void AddCurrentInventoryToBatchSelling()
+    {
+        if (controller.Busy) return;
+        controller.SnapshotExceptionInventory();
+        if (controller.ExceptionInventorySnapshotError is { } snapshotError)
+        {
+            batchBulkAddMessage = $"Could not add current inventory: {snapshotError}";
+            return;
+        }
+
+        var inventoryItems = controller.ExceptionInventoryCandidates
+            .Where(item => !config.ExcludedItemIds.Contains(item.ItemId))
+            .GroupBy(item => item.ItemId)
+            .Select(group => group.First())
+            .ToArray();
+        var added = 0;
+        foreach (var item in inventoryItems)
+        {
+            if (config.BatchSaleQuantities.ContainsKey(item.ItemId)) continue;
+            config.BatchSaleQuantities[item.ItemId] = (uint)batchQuantityInput;
+            config.BatchSaleMaxQuantities[item.ItemId] = (uint)batchMaximumTotalInput;
+            added++;
+        }
+        config.Normalize();
+        if (added > 0) save();
+        batchBulkAddMessage = inventoryItems.Length == 0
+            ? "No eligible carried inventory items to add; excluded and unmarketable items are skipped."
+            : $"Added {added} item(s) to batch selling; {inventoryItems.Length - added} were already on the list. New entries use the current per-listing and total limits.";
     }
 
     private void RefreshMatches(string query, ref string previousQuery, ref List<ItemChoice> results)
@@ -677,3 +737,4 @@ internal sealed class MainWindow : Window
         return age.TotalMinutes >= 1 ? $"{Math.Max(0, (int)age.TotalMinutes)}m" : $"{Math.Max(0, (int)age.TotalSeconds)}s";
     }
 }
+

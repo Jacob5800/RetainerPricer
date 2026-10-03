@@ -15,6 +15,8 @@ public sealed class PluginConfig : IPluginConfiguration
     public int MinimumPrice { get; set; } = 1;
     public List<uint> ExcludedItemIds { get; set; } = [];
     public Dictionary<uint, uint> BatchSaleQuantities { get; set; } = [];
+    // Zero or missing means unlimited total quantity for that item during one listing run.
+    public Dictionary<uint, uint> BatchSaleMaxQuantities { get; set; } = [];
 
     public void Normalize()
     {
@@ -25,5 +27,8 @@ public sealed class PluginConfig : IPluginConfiguration
         ExcludedItemIds = (ExcludedItemIds ?? []).Where(id => id != 0).Distinct().ToList();
         BatchSaleQuantities = (BatchSaleQuantities ?? []).Where(pair => pair.Key != 0)
             .ToDictionary(pair => pair.Key, pair => (uint)Math.Clamp((long)pair.Value, 1, 9_999));
+        BatchSaleMaxQuantities = (BatchSaleMaxQuantities ?? []).Where(pair => pair.Key != 0 && BatchSaleQuantities.ContainsKey(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => pair.Value == 0 ? 0 : (uint)Math.Clamp((long)pair.Value, 1, 999_999_999));
     }
 }
+
