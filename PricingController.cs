@@ -109,18 +109,14 @@ internal sealed class PricingController : IDisposable
                 Cancel("Stopped because the character disconnected, began loading, or started logging out.");
                 return;
             }
-            if (work != Work.Manual &&
-                (session is null || !bridge.TryGetSession(out var active, out _) || active != session))
+            if (work != Work.Manual && session is not null && bridge.IsSessionIdentityChanged(session))
             {
-                Cancel("Stopped because the retainer window closed or the character, world, or retainer changed.");
+                Cancel("Stopped because the character, world, or active retainer changed.");
                 return;
             }
-            if ((work is Work.Single or Work.Scan or Work.BatchListing) && workingItem is not null &&
-                step != Step.Confirming && !bridge.IsSellWindowVisible)
-            {
-                Cancel("Stopped because the retainer's item window was closed.");
-                return;
-            }
+            // RetainerSell can briefly become hidden while the game transitions from its selling list
+            // to the item form. Step-specific reads and submit methods revalidate the exact item dialog
+            // before changing a price, so don't abort the whole operation on visibility alone.
         }
         else
         {
