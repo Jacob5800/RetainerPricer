@@ -14,14 +14,6 @@ Prices compare HQ and NQ separately, exclude all of your retainers, and target o
 
 Universalis requests are on demand and are limited to the selected item and home world. Items are left unchanged when Universalis has no matching current listing or no sale from the previous 20 days. The plugin does not upload player or market data.
 
-## Build
-
-```powershell
-dotnet build RetainerPricer.csproj --configuration Release
-```
-
-The Release build places the plugin DLL at `dist\Release\RetainerPricer.dll` and its install package in `dist\Release\RetainerPricer`. GitHub Actions builds pushes and pull requests, then creates or updates the release package and refreshes the Dalamud feed for a published `vX.Y.Z` release or pushed tag.
-
 ## Install
 
 In Dalamud Settings → Experimental → Custom Plugin Repositories, add `https://raw.githubusercontent.com/Jacob5800/RetainerPricer/main/repo.json` for installer updates.
