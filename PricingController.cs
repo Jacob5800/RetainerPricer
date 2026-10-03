@@ -10,7 +10,7 @@ internal sealed class PriceRow(SellItem item)
 
 internal sealed class PricingController : IDisposable
 {
-    private const int ExistingListingUpdateIntervalMilliseconds = 1_000;
+    private const int ExistingListingUpdateIntervalMilliseconds = 500;
     private enum Work { Idle, Single, Manual, Scan, BatchListing }
     private enum Step { Start, Opening, WaitingToCompare, Quote, Closing, ClosingListingCompare, ClosingSkippedCompare, ClosingSkippedSell, Confirming }
     private readonly NativeMarketBridge bridge;
