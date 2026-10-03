@@ -166,6 +166,23 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         return true;
     }
 
+    public bool IsSessionIdentityChanged(MarketSession expected)
+    {
+        if (!player.IsLoaded || player.ContentId == 0 || player.ContentId != expected.ContentId ||
+            player.CurrentWorld.RowId != expected.WorldId)
+            return true;
+
+        var manager = RetainerManager.Instance();
+        if (manager == null || !manager->IsReady) return false;
+        if (manager->LastSelectedRetainerId != 0 && manager->LastSelectedRetainerId != expected.RetainerId)
+            return true;
+
+        var agent = AgentRetainer.Instance();
+        if (RetainerAgentView.For(agent) is null || !agent->IsAgentActive()) return false;
+        var active = manager->GetActiveRetainer();
+        return active != null && active->RetainerId != expected.RetainerId;
+    }
+
     private string? GetHomeDataCenterName()
     {
         if (!player.IsLoaded || player.HomeWorld.RowId == 0) return null;
