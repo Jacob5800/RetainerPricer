@@ -1,6 +1,6 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.2.3.0</Version>
+    <Version>0.2.4.0</Version>
     <Author>Jacob5800</Author>
     <Name>Retainer Pricer</Name>
     <Punchline>Automatically price new and existing retainer listings.</Punchline>
