@@ -45,7 +45,6 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     private bool resultReceived;
     private bool requestComplete;
     private int expectedListingCount;
-    private int gameNetworkErrorToken;
     private string localError = "Compare prices in the current sell window first.";
     private nint sellAddress;
     private bool sellWasVisible;
@@ -84,8 +83,8 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     }
 
     public NativeMarketBridge(IGameGui gameGui, IDataManager data, IPlayerState player,
-        IClientState clientState, ICondition condition, IAddonLifecycle lifecycle,
-        IGameInteropProvider interop, ISigScanner scanner, IPluginLog log)
+        IClientState clientState, ICondition condition,
+        IAddonLifecycle lifecycle, IGameInteropProvider interop, ISigScanner scanner, IPluginLog log)
     {
         this.gameGui = gameGui;
         this.data = data;
@@ -710,9 +709,6 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     {
         try
         {
-            if (error != 0)
-                Interlocked.Exchange(ref gameNetworkErrorToken, error);
-
             if (compareItem != null && proxy != null && proxy->SearchItemId == compareItem.ItemId)
             {
                 resultReceived = error == 0;
@@ -725,12 +721,6 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         }
         catch (Exception ex) { log.Error(ex, "Tracking local market request status failed."); }
         resultHook!.Original(proxy, count, error);
-    }
-
-    public bool TryConsumeGameNetworkError(out int token)
-    {
-        token = Interlocked.Exchange(ref gameNetworkErrorToken, 0);
-        return token != 0;
     }
 
     private void OnEndRequest(InfoProxyItemSearch* proxy)

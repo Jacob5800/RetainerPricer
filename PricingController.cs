@@ -32,6 +32,7 @@ internal sealed class PricingController : IDisposable
     private DateTimeOffset nextTick;
     private DateTimeOffset deadline;
     private string? pendingSkipMessage;
+    private bool suppressAutoPriceUntilSellWindowCloses;
     private SellItem? workingItem;
     private ManualQuoteTarget? manualTarget;
     private MarketSession? session;
@@ -99,11 +100,6 @@ internal sealed class PricingController : IDisposable
         var now = DateTimeOffset.UtcNow;
         if (work != Work.Idle)
         {
-            if (bridge.TryConsumeGameNetworkError(out var networkErrorToken))
-            {
-                Cancel($"Stopped because the game returned a market/network error token (0x{networkErrorToken:X8}).");
-                return;
-            }
             if (bridge.IsClientStateUnavailable)
             {
                 Cancel("Stopped because the character disconnected, began loading, or started logging out.");
@@ -118,19 +114,19 @@ internal sealed class PricingController : IDisposable
             // to the item form. Step-specific reads and submit methods revalidate the exact item dialog
             // before changing a price, so don't abort the whole operation on visibility alone.
         }
-        else
-        {
-            // Ignore late callback errors from a request that completed after its operation ended.
-            bridge.TryConsumeGameNetworkError(out _);
-        }
-
         if (now < nextTick) return;
         nextTick = now.AddMilliseconds(250);
         CurrentItem = bridge.TryReadSellItem(out var selected, out _) ? selected : null;
         if (work == Work.Manual) { TickManual(now); return; }
         if (work == Work.Idle)
         {
-            if (CurrentItem is { } item && item.DialogGeneration != seenDialog)
+            if (CurrentItem is not { } item)
+            {
+                if (!bridge.IsSellWindowVisible) suppressAutoPriceUntilSellWindowCloses = false;
+                return;
+            }
+            if (suppressAutoPriceUntilSellWindowCloses) return;
+            if (item.DialogGeneration != seenDialog)
             {
                 seenDialog = item.DialogGeneration;
                 CurrentSnapshot = null;
@@ -240,6 +236,7 @@ internal sealed class PricingController : IDisposable
         step = Step.Start;
         workSource = PriceSource.Universalis;
         work = Work.BatchListing;
+        suppressAutoPriceUntilSellWindowCloses = false;
         var scope = batchOnly ? "configured Batch selling item stack(s) only" : "eligible stack(s)";
         Status = $"Automatically listing {batchCandidates.Count} {scope} using Universalis. Each item needs a current competing listing and a sale from the last 20 days.";
     }
@@ -928,6 +925,9 @@ internal sealed class PricingController : IDisposable
         manualTarget = null;
         if (wasBatchListing)
         {
+            // A batch can stop while its item dialog is still on screen. Don't let the
+            // idle one-item auto-pricer take that same dialog over and hide the stop reason.
+            suppressAutoPriceUntilSellWindowCloses = bridge.IsSellWindowVisible;
             batchCandidates.Clear();
             batchSellingOnly = false;
             listingCandidate = null;

@@ -115,7 +115,7 @@ internal sealed class MainWindow : Window
         ImGui.BeginDisabled(controller.Busy);
         var automatic = config.AutoPriceNewListings;
         if (ImGui.Checkbox("Automatically price and confirm new listings", ref automatic)) { config.AutoPriceNewListings = automatic; save(); }
-        ImGui.TextDisabled("When enabled, a newly opened eligible sale window is priced with Universalis and submitted automatically. Use Start listing items to process all eligible carried inventory.");
+        ImGui.TextDisabled("This checkbox auto-prices only the currently opened sale item. Use Start listing items to process all eligible inventory and continue through the list automatically.");
         var source = (int)PriceSource.Universalis;
         ImGui.SetNextItemWidth(250);
         ImGui.Combo("On-screen price check source", ref source, "Universalis\0");
