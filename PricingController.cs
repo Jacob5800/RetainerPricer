@@ -10,7 +10,7 @@ internal sealed class PriceRow(SellItem item)
 
 internal sealed class PricingController : IDisposable
 {
-    private const int ExistingListingUpdateIntervalMilliseconds = 500;
+    private static int GetExistingListingUpdateDelayMilliseconds() => Random.Shared.Next(350, 601);
     private enum Work { Idle, Single, Manual, Scan, BatchListing }
     private enum Step { Start, Opening, WaitingToCompare, Quote, Closing, ClosingListingCompare, ClosingSkippedCompare, ClosingSkippedSell, Confirming }
     private readonly NativeMarketBridge bridge;
@@ -443,7 +443,7 @@ internal sealed class PricingController : IDisposable
                 step = Step.Start;
                 workingItem = null;
                 ResetRequest();
-                nextTick = now.AddMilliseconds(ExistingListingUpdateIntervalMilliseconds);
+                nextTick = now.AddMilliseconds(GetExistingListingUpdateDelayMilliseconds());
                 return;
             }
             if (now > deadline)
