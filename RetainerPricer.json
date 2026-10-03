@@ -2,7 +2,7 @@
   "Author": "Jacob5800",
   "Name": "Retainer Pricer",
   "InternalName": "RetainerPricer",
-  "AssemblyVersion": "0.2.10.0",
+  "AssemblyVersion": "0.2.11.0",
   "Description": "Automatically price eligible inventory and reprice existing listings one gil below matching competition using Universalis market prices and recent sale history.",
   "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
   "ApplicableVersion": "any",
@@ -12,5 +12,5 @@
   "LoadSync": false,
   "CanUnloadAsync": true,
   "Punchline": "Automatically price new and existing retainer listings.",
-  "Changelog": "Allow brief retainer-window transitions during batch listing while retaining item, character, world, and active-retainer checks."
+  "Changelog": "Automatically submit and verify eligible new item listings after pricing them with Universalis."
 }
