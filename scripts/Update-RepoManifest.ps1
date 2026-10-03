@@ -24,6 +24,7 @@ $entry = [ordered]@{
     DalamudApiLevel = $manifest.DalamudApiLevel
     Punchline = $manifest.Punchline
     Description = $manifest.Description
+    Changelog = $manifest.Changelog
     IsHide = $false
     IsTestingExclusive = $false
     DownloadLinkInstall = $download
