@@ -3,18 +3,18 @@
     "Author": "Jacob5800",
     "Name": "Retainer Pricer",
     "InternalName": "RetainerPricer",
-    "AssemblyVersion": "0.2.7.0",
+    "AssemblyVersion": "0.2.8.0",
     "TestingAssemblyVersion": null,
     "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
     "Punchline": "Automatically price new and existing retainer listings.",
     "Description": "Automatically price eligible inventory and reprice existing listings one gil below matching competition using Universalis market prices and recent sale history.",
-    "Changelog": "Added an optional region-wide Universalis price scope covering the home region and Oceania (Materia).",
+    "Changelog": "Added weighted repricing pauses and immediate stops for closed retainer windows, loading/disconnects, and game request errors.",
     "IsHide": false,
     "IsTestingExclusive": false,
     "DownloadLinkInstall": "https://github.com/Jacob5800/RetainerPricer/releases/latest/download/latest.zip",
     "DownloadLinkUpdate": "https://github.com/Jacob5800/RetainerPricer/releases/latest/download/latest.zip",
-    "LastUpdate": "1791012695"
+    "LastUpdate": "1791015047"
   }
 ]
