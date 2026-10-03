@@ -278,6 +278,27 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         return result;
     }
 
+    public bool TryReadCarriedStackQuantity(CarriedItemCandidate expected, out uint quantity, out string error)
+    {
+        quantity = 0;
+        var type = (InventoryType)expected.InventoryType;
+        if (type is not (InventoryType.Inventory1 or InventoryType.Inventory2 or InventoryType.Inventory3 or InventoryType.Inventory4))
+        { error = "The original carried inventory slot is invalid."; return false; }
+        var inventory = InventoryManager.Instance();
+        var container = inventory == null ? null : inventory->GetInventoryContainer(type);
+        if (container == null || !container->IsLoaded || expected.Slot < 0 || expected.Slot >= container->Size)
+        { error = "The carried inventory is still loading."; return false; }
+        var stock = container->GetInventorySlot(expected.Slot);
+        if (stock == null)
+        { error = "The original carried inventory slot is unavailable."; return false; }
+        if (stock->IsEmpty()) { error = string.Empty; return true; }
+        if (stock->GetBaseItemId() != expected.ItemId || stock->IsHighQuality() != expected.IsHq)
+        { error = "The original inventory slot now contains a different item. The batch stopped."; return false; }
+        quantity = stock->GetQuantity();
+        error = string.Empty;
+        return true;
+    }
+
     public IReadOnlySet<ulong> OwnRetainerIds()
     {
         return TryGetOwnRetainerIds(out var ids) ? ids : new HashSet<ulong>();
@@ -327,6 +348,29 @@ public sealed unsafe class NativeMarketBridge : IDisposable
             return false;
         }
         error = string.Empty;
+        return true;
+    }
+
+    public bool TrySetNewListingQuantity(SellItem expected, uint quantity, out SellItem updated, out string error)
+    {
+        updated = null!;
+        if (expected.IsExisting || expected.DialogGeneration == 0 || quantity == 0 || quantity > expected.Quantity)
+        { error = "Choose a valid quantity for a new inventory listing."; return false; }
+        if (!MatchesCurrentDialog(expected, true, out _, out error)) return false;
+        var addon = GetSellAddon();
+        var agent = AgentRetainer.Instance();
+        var agentView = RetainerAgentView.For(agent);
+        if (addon == null || agentView == null || addon->Quantity == null)
+        { error = "The game's sale quantity field is unavailable."; return false; }
+
+        // Use the game's numeric-input callback so its retainer agent receives the quantity too.
+        addon->Quantity->InnerSetValue((int)quantity, true, false);
+        if (addon->Quantity->Value != quantity || agentView->SellQuantity != quantity)
+        { error = "The game's sale quantity field did not accept the batch size. No listing was confirmed."; return false; }
+        if (!TryReadSellItem(out updated, out error)) return false;
+        if (updated.ItemId != expected.ItemId || updated.IsHq != expected.IsHq || updated.Slot != expected.Slot ||
+            updated.InventoryType != expected.InventoryType || updated.Quantity != quantity)
+        { error = "The sale item changed while its batch size was being set. No listing was confirmed."; return false; }
         return true;
     }
 

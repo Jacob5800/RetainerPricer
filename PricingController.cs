@@ -36,6 +36,7 @@ internal sealed class PricingController : IDisposable
     private HashSet<int> preListingSlots = [];
     private CarriedItemCandidate? listingCandidate;
     private uint listingSubmittedPrice;
+    private uint requestedListingQuantity;
     private int listingSucceeded;
     private int listingSkipped;
 
@@ -187,6 +188,7 @@ internal sealed class PricingController : IDisposable
         listingSucceeded = 0;
         listingSkipped = 0;
         listingCandidate = null;
+        requestedListingQuantity = 0;
         step = Step.Start;
         workSource = PriceSource.Universalis;
         work = Work.BatchListing;
@@ -454,6 +456,9 @@ internal sealed class PricingController : IDisposable
             { SkipBatchItem("Skipped an item that is now excluded or not marketable."); return; }
 
             listingCandidate = candidate;
+            requestedListingQuantity = config.BatchSaleQuantities.TryGetValue(candidate.ItemId, out var batchSize)
+                ? Math.Min(batchSize, candidate.Quantity)
+                : candidate.Quantity;
             preListingSlots = listedBefore.Select(row => row.Slot).ToHashSet();
             if (!bridge.TryOpenInventoryItem(candidate, out var openError))
             { Cancel($"Automatic listing stopped before opening {candidate.Name}: {openError}"); return; }
@@ -471,8 +476,13 @@ internal sealed class PricingController : IDisposable
                 return;
             }
             if (listingCandidate is not { } expected || opened.IsExisting || opened.ItemId != expected.ItemId ||
-                opened.IsHq != expected.IsHq || opened.InventoryType != expected.InventoryType || opened.Slot != expected.Slot)
+                opened.IsHq != expected.IsHq || opened.Quantity != expected.Quantity ||
+                opened.InventoryType != expected.InventoryType || opened.Slot != expected.Slot)
             { Cancel("Automatic listing stopped because the opened item differs from the inventory snapshot. No price was submitted."); return; }
+
+            if (requestedListingQuantity < opened.Quantity &&
+                !bridge.TrySetNewListingQuantity(opened, requestedListingQuantity, out opened, out var quantityError))
+            { Cancel($"Automatic listing stopped before pricing {opened.Name}: {quantityError}"); return; }
 
             workingItem = opened;
             if (!StartRequest(opened, now, out var requestError))
@@ -603,6 +613,29 @@ internal sealed class PricingController : IDisposable
                     && row.ItemId == expected.ItemId && row.IsHq == expected.IsHq
                     && row.Quantity == submitted.Quantity && row.CurrentPrice == listingSubmittedPrice))
             {
+                var remaining = expected.Quantity - submitted.Quantity;
+                if (remaining > 0)
+                {
+                    if (!bridge.TryReadCarriedStackQuantity(expected, out var currentQuantity, out var inventoryError))
+                    { Cancel($"The listing was confirmed, but the remaining {submitted.Name} stack could not be verified: {inventoryError}"); return; }
+                    if (currentQuantity != remaining)
+                    {
+                        if (now > deadline)
+                        { Cancel($"The listing was confirmed, but the remaining {submitted.Name} quantity could not be verified. Check the retainer and inventory before restarting."); return; }
+                        Status = $"{submitted.Name} was listed. Waiting for its remaining inventory stack to update before splitting it again...";
+                        return;
+                    }
+                    batchCandidates[index] = expected with { Quantity = remaining };
+                    listingSucceeded++;
+                    listingCandidate = null;
+                    workingItem = null;
+                    step = Step.Start;
+                    ResetRequest();
+                    nextTick = now.AddMilliseconds(900);
+                    Status = $"Listed {submitted.Name} × {submitted.Quantity:N0}. Continuing with the {remaining:N0} remaining item(s) in that stack.";
+                    return;
+                }
+
                 listingSucceeded++;
                 index++;
                 listingCandidate = null;

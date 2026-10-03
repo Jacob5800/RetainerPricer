@@ -23,6 +23,11 @@ internal sealed class MainWindow : Window
     private string exceptionSearchCache = "";
     private List<ItemChoice> exceptionMatches = [];
     private ItemChoice? exceptionSelection;
+    private string batchSearch = "";
+    private string batchSearchCache = "";
+    private List<ItemChoice> batchMatches = [];
+    private ItemChoice? batchSelection;
+    private int batchQuantityInput = 10;
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
         Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
@@ -73,7 +78,7 @@ internal sealed class MainWindow : Window
             if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
             ImGui.PopStyleColor(3);
         }
-        ImGui.TextDisabled("Start listing items prices eligible carried inventory. Update existing listings reprices current stock. Both use Universalis; items need a current competing price and a sale from the last 20 days.");
+        ImGui.TextDisabled("Start listing items prices eligible carried inventory. Items on the Batch selling tab are split into smaller listings; all other items stay as full stacks. Update existing listings reprices current stock. Both use Universalis and require a recent sale.");
         if (controller.Busy)
             ImGui.TextDisabled("The active listing task is highlighted. Stop cancels it; changes already submitted remain applied.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
@@ -108,6 +113,7 @@ internal sealed class MainWindow : Window
             if (ImGui.BeginTabItem("Price lookup")) { DrawManualLookup(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Existing listings")) { DrawExisting(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Exceptions")) { DrawExceptions(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("Batch selling")) { DrawBatchSelling(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Settings")) { DrawSettings(); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
         }
@@ -483,6 +489,111 @@ internal sealed class MainWindow : Window
             }
         }
         ImGui.EndChild();
+    }
+
+    private void DrawBatchSelling()
+    {
+        ImGui.TextUnformatted("Per-item batch sizes");
+        ImGui.TextWrapped("Only items on this list are split when Start listing items runs. Each listed stack is divided into listings no larger than that item's batch size; other items are listed as full stacks. Exclusions take priority. Existing listings are not split.");
+
+        ImGui.BeginDisabled(controller.Busy);
+        if (ImGui.Button(controller.ExceptionInventorySnapshotAt is null ? "Grab carried inventory" : "Refresh item picker"))
+            dispatch(controller.SnapshotExceptionInventory);
+        ImGui.EndDisabled();
+        if (controller.ExceptionInventorySnapshotError is { } inventoryError)
+            ImGui.TextWrapped(inventoryError);
+        else if (controller.ExceptionInventorySnapshotAt is { } snapshotAt)
+            ImGui.TextDisabled($"Inventory picker refreshed · {controller.ExceptionInventoryCandidates.Count} marketable item stack(s) · {snapshotAt:HH:mm:ss}.");
+
+        ImGui.SetNextItemWidth(360);
+        ImGui.InputText("Search item names", ref batchSearch, 128);
+        if (!StringComparer.CurrentCultureIgnoreCase.Equals(batchSearch, batchSearchCache))
+            batchSelection = null;
+        RefreshMatches(batchSearch, ref batchSearchCache, ref batchMatches);
+
+        var inventoryItems = controller.ExceptionInventoryCandidates
+            .GroupBy(item => item.ItemId)
+            .Select(group => new ItemChoice(group.Key, group.First().Name));
+        var pickerItems = inventoryItems.Concat(batchMatches)
+            .GroupBy(item => item.ItemId).Select(group => group.First()).ToList();
+        var preview = batchSelection is { } selected
+            ? $"{selected.Name}  ·  #{selected.ItemId}"
+            : "Select an inventory or matching item...";
+        ImGui.SetNextItemWidth(420);
+        if (ImGui.BeginCombo("Item to sell in batches", preview))
+        {
+            if (pickerItems.Count == 0)
+                ImGui.TextDisabled(batchSearch.Trim().Length < 2
+                    ? "Grab carried inventory or enter at least two characters to search."
+                    : "No inventory items or matching item names found.");
+            foreach (var candidate in pickerItems)
+            {
+                var alreadyConfigured = config.BatchSaleQuantities.ContainsKey(candidate.ItemId);
+                var label = $"{candidate.Name}  ·  #{candidate.ItemId}" + (alreadyConfigured ? " (batch size set)" : "");
+                ImGui.BeginDisabled(alreadyConfigured);
+                if (ImGui.Selectable(label, batchSelection?.ItemId == candidate.ItemId))
+                    batchSelection = candidate;
+                ImGui.EndDisabled();
+            }
+            ImGui.EndCombo();
+        }
+
+        ImGui.SetNextItemWidth(140);
+        ImGui.InputInt("Maximum items per listing", ref batchQuantityInput);
+        batchQuantityInput = Math.Clamp(batchQuantityInput, 1, 9_999);
+        var canAddBatchItem = batchSelection is { } choice && !config.BatchSaleQuantities.ContainsKey(choice.ItemId);
+        ImGui.BeginDisabled(controller.Busy || !canAddBatchItem);
+        if (ImGui.Button("Add to batch list") && batchSelection is { } addChoice)
+        {
+            config.BatchSaleQuantities[addChoice.ItemId] = (uint)batchQuantityInput;
+            config.Normalize();
+            save();
+            batchSelection = null;
+        }
+        ImGui.EndDisabled();
+
+        ImGui.Separator();
+        ImGui.TextUnformatted($"Items sold in batches · {config.BatchSaleQuantities.Count}");
+        if (config.BatchSaleQuantities.Count == 0)
+        {
+            ImGui.TextDisabled("No batch sizes set. Every item will be listed as one full stack.");
+            return;
+        }
+        if (!ImGui.BeginTable("##batchSaleItems", 3, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable, new Vector2(0, 220))) return;
+        ImGui.TableSetupColumn("Item");
+        ImGui.TableSetupColumn("Max per listing", ImGuiTableColumnFlags.WidthFixed, 130);
+        ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 90);
+        ImGui.TableSetupScrollFreeze(0, 1);
+        ImGui.TableHeadersRow();
+        foreach (var entry in config.BatchSaleQuantities.OrderBy(entry => itemChoices.FirstOrDefault(item => item.ItemId == entry.Key)?.Name ?? $"Item {entry.Key}").ToArray())
+        {
+            var name = itemChoices.FirstOrDefault(item => item.ItemId == entry.Key)?.Name
+                ?? controller.ExceptionInventoryCandidates.FirstOrDefault(item => item.ItemId == entry.Key)?.Name
+                ?? $"Item {entry.Key}";
+            ImGui.PushID((int)entry.Key);
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn(); ImGui.TextWrapped($"{name}  ·  #{entry.Key}");
+            ImGui.TableNextColumn();
+            var quantity = (int)Math.Min(entry.Value, 9_999);
+            ImGui.SetNextItemWidth(110);
+            ImGui.BeginDisabled(controller.Busy);
+            if (ImGui.InputInt("##batchQuantity", ref quantity))
+            {
+                config.BatchSaleQuantities[entry.Key] = (uint)Math.Clamp(quantity, 1, 9_999);
+                config.Normalize();
+                save();
+            }
+            ImGui.TableNextColumn();
+            if (ImGui.SmallButton("Remove"))
+            {
+                config.BatchSaleQuantities.Remove(entry.Key);
+                save();
+            }
+            ImGui.EndDisabled();
+            ImGui.PopID();
+        }
+        ImGui.EndTable();
     }
 
     private void RefreshMatches(string query, ref string previousQuery, ref List<ItemChoice> results)
