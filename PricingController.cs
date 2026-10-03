@@ -14,7 +14,7 @@ internal sealed class PricingController : IDisposable
     {
         var band = Random.Shared.Next(100);
         return band < 70 ? Random.Shared.Next(400, 651)
-            : band < 85 ? Random.Shared.Next(350, 400)
+            : band < 85 ? Random.Shared.Next(365, 400)
             : Random.Shared.Next(651, 851);
     }
     private enum Work { Idle, Single, Manual, Scan, BatchListing }
