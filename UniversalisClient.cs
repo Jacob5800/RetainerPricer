@@ -15,7 +15,7 @@ public sealed class UniversalisClient : IDisposable
 {
     private const int MaximumResponseBytes = 1_048_576;
     private const int HistoryEntryLimit = 100;
-    private const int HistoryWindowSeconds = 14 * 24 * 60 * 60;
+    private const int HistoryWindowSeconds = 20 * 24 * 60 * 60;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
     private readonly HttpClient client;
     private readonly bool ownsClient;
@@ -43,7 +43,7 @@ public sealed class UniversalisClient : IDisposable
         deadline.CancelAfter(RequestTimeout);
         try
         {
-            // https://docs.universalis.app/ — current listings and sales in the previous 14 days.
+            // https://docs.universalis.app/ — current listings and sales in the previous 20 days.
             using var request = new HttpRequestMessage(HttpMethod.Get,
                 $"https://universalis.app/api/v2/{worldId}/{itemId}?entries={HistoryEntryLimit}&entriesWithin={HistoryWindowSeconds}");
             request.Headers.UserAgent.ParseAdd("RetainerPricer/0.1");

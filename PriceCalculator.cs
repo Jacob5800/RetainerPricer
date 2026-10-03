@@ -6,7 +6,7 @@ namespace RetainerPricer;
 public static class PriceCalculator
 {
     public const uint MaximumPrice = 999_999_999;
-    public static readonly TimeSpan RequiredSaleHistoryWindow = TimeSpan.FromDays(14);
+    public static readonly TimeSpan RequiredSaleHistoryWindow = TimeSpan.FromDays(20);
 
     public static PriceProposal Calculate(
         PriceSnapshot snapshot,
@@ -65,11 +65,11 @@ public static class PriceCalculator
             if (snapshot.Source == PriceSource.Universalis)
                 return Fail(hasRecentSale
                     ? "Universalis has no current competing listings of the same quality. No price will be applied."
-                    : "Universalis has no sale history from the last 14 days and no current competing listings of the same quality. No price will be applied.");
+                    : "Universalis has no sale history from the last 20 days and no current competing listings of the same quality. No price will be applied.");
             return Fail("No competing listings of the same quality were found. No automatic price was applied.");
         }
         if (snapshot.Source == PriceSource.Universalis && !hasRecentSale)
-            return Fail("Universalis has no sale history for this item in the last 14 days. No price will be applied.", lowest, matches);
+            return Fail("Universalis has no sale history for this item in the last 20 days. No price will be applied.", lowest, matches);
         if (lowest == 1)
             return Fail("The lowest competing price is already 1 gil and cannot be undercut.", lowest, matches);
 

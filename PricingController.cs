@@ -189,7 +189,7 @@ internal sealed class PricingController : IDisposable
         step = Step.Start;
         workSource = PriceSource.Universalis;
         work = Work.BatchListing;
-        Status = $"Automatically listing {batchCandidates.Count} eligible stack(s) using Universalis. Each item needs a current competing listing and a sale from the last 14 days.";
+        Status = $"Automatically listing {batchCandidates.Count} eligible stack(s) using Universalis. Each item needs a current competing listing and a sale from the last 20 days.";
     }
 
     public void SnapshotExceptionInventory()
@@ -275,7 +275,7 @@ internal sealed class PricingController : IDisposable
         step = Step.Start;
         cache.Clear();
         workSource = PriceSource.Universalis;
-        Status = $"Automatically checking and updating {items.Count} eligible listing(s) with Universalis ({excluded} excluded, {unmarketable} not marketable). Items without a competing listing or a sale in the last 14 days will be left unchanged.";
+        Status = $"Automatically checking and updating {items.Count} eligible listing(s) with Universalis ({excluded} excluded, {unmarketable} not marketable). Items without a competing listing or a sale in the last 20 days will be left unchanged.";
     }
 
     private void TickManual(DateTimeOffset now)

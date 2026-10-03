@@ -69,7 +69,7 @@ internal sealed class MainWindow : Window
             if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
             ImGui.PopStyleColor(3);
         }
-        ImGui.TextDisabled("Start listing items prices eligible carried inventory. Update existing listings reprices current stock. Both use Universalis; items need a current competing price and a sale from the last 14 days.");
+        ImGui.TextDisabled("Start listing items prices eligible carried inventory. Update existing listings reprices current stock. Both use Universalis; items need a current competing price and a sale from the last 20 days.");
         if (controller.Busy)
             ImGui.TextDisabled("The active listing task is highlighted. Stop cancels it; changes already submitted remain applied.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
@@ -83,8 +83,8 @@ internal sealed class MainWindow : Window
         { config.Source = (PriceSource)source; save(); }
         if (config.Source == PriceSource.Universalis)
             ImGui.TextWrapped(config.UseMaximumPriceAge
-                ? $"This source applies to Check price again on an open selling window. Universalis upload data older than {config.MaximumAgeMinutes} minutes is skipped. Automatic listing actions also require a sale in the last 14 days."
-                : "This source applies to Check price again on an open selling window. Upload age is not filtered; automatic listing actions always use Universalis and require sales in the last 14 days.");
+                ? $"This source applies to Check price again on an open selling window. Universalis upload data older than {config.MaximumAgeMinutes} minutes is skipped. Automatic listing actions also require a sale in the last 20 days."
+                : "This source applies to Check price again on an open selling window. Upload age is not filtered; automatic listing actions always use Universalis and require sales in the last 20 days.");
         else
         {
             ImGui.TextWrapped("This source applies only to Check price again on an open selling window. Automatic new listings and existing-listing updates always use Universalis.");
@@ -479,7 +479,7 @@ internal sealed class MainWindow : Window
     {
         var history = snapshot.Source != PriceSource.Universalis ? ""
             : snapshot.MostRecentSaleAt is { } saleAt ? $" · last sale {Age(saleAt)} ago"
-            : " · no sale in the last 14 days";
+            : " · no sale in the last 20 days";
         ImGui.TextUnformatted($"{snapshot.Source}: {Age(snapshot.ObservedAt)} old · {snapshot.ObservedAt.ToLocalTime():HH:mm:ss}{history}");
     }
 
