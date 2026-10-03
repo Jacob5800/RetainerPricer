@@ -1,4 +1,5 @@
 using Dalamud.Game.Command;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -22,13 +23,14 @@ public sealed class Plugin : IDalamudPlugin
     private bool disposed;
 
     public Plugin(IDalamudPluginInterface pluginInterface, ICommandManager commands, IFramework framework,
-        IGameGui gameGui, IDataManager data, IPlayerState player, IAddonLifecycle addons,
+        IGameGui gameGui, IDataManager data, IPlayerState player, IClientState clientState,
+        ICondition condition, IAddonLifecycle addons,
         IGameInteropProvider interop, ISigScanner sigScanner, IPluginLog log)
     {
         (this.pluginInterface, this.commands, this.framework, this.log) = (pluginInterface, commands, framework, log);
         config = pluginInterface.GetPluginConfig() as PluginConfig ?? new PluginConfig();
         config.Normalize();
-        bridge = new NativeMarketBridge(gameGui, data, player, addons, interop, sigScanner, log);
+        bridge = new NativeMarketBridge(gameGui, data, player, clientState, condition, addons, interop, sigScanner, log);
         var itemSheet = data.GetExcelSheet<Item>();
         var itemChoices = itemSheet
             .Select(item => new ItemChoice(item.RowId, item.Name.ToString()))
