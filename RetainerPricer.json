@@ -12,5 +12,5 @@
   "LoadSync": false,
   "CanUnloadAsync": true,
   "Punchline": "Automatically price new and existing retainer listings.",
-  "Changelog": "Added weighted 350–850 ms pauses after confirmed existing-listing reprices."
+  "Changelog": "Added weighted repricing pauses and immediate stops for closed retainer windows, loading/disconnects, and game request errors."
 }
