@@ -2,7 +2,7 @@
   "Author": "Jacob5800",
   "Name": "Retainer Pricer",
   "InternalName": "RetainerPricer",
-  "AssemblyVersion": "0.1.14.0",
+  "AssemblyVersion": "0.2.0.0",
   "Description": "Automatically price eligible inventory and reprice existing listings one gil below matching competition using Universalis market prices and recent sale history.",
   "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
   "ApplicableVersion": "any",

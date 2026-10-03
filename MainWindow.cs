@@ -23,6 +23,7 @@ internal sealed class MainWindow : Window
     private string exceptionSearchCache = "";
     private List<ItemChoice> exceptionMatches = [];
     private ItemChoice? exceptionSelection;
+    private string? exceptionBulkAddMessage;
     private string batchSearch = "";
     private string batchSearchCache = "";
     private List<ItemChoice> batchMatches = [];
@@ -443,6 +444,7 @@ internal sealed class MainWindow : Window
             .Select(group => new ItemChoice(group.Key, group.First().Name))
             .ToList();
         var pickerItems = inventoryItems.Concat(exceptionMatches)
+            .Where(item => !config.ExcludedItemIds.Contains(item.ItemId))
             .GroupBy(item => item.ItemId).Select(group => group.First()).ToList();
         var preview = exceptionSelection is { } selected
             ? $"{selected.Name}  ·  #{selected.ItemId}"
@@ -453,15 +455,12 @@ internal sealed class MainWindow : Window
             if (pickerItems.Count == 0)
                 ImGui.TextDisabled(exceptionSearch.Trim().Length < 2
                     ? "Enter at least two characters to search the item list."
-                    : "No inventory items or matching item names found.");
+                    : "No available inventory items or matching names found.");
             foreach (var candidate in pickerItems)
             {
-                var alreadyExcluded = config.ExcludedItemIds.Contains(candidate.ItemId);
-                var label = $"{candidate.Name}  ·  #{candidate.ItemId}" + (alreadyExcluded ? " (excluded)" : "");
-                ImGui.BeginDisabled(alreadyExcluded);
+                var label = $"{candidate.Name}  ·  #{candidate.ItemId}";
                 if (ImGui.Selectable(label, exceptionSelection?.ItemId == candidate.ItemId))
                     exceptionSelection = candidate;
-                ImGui.EndDisabled();
             }
             ImGui.EndCombo();
         }
@@ -471,8 +470,16 @@ internal sealed class MainWindow : Window
         {
             AddExclusion(addChoice.ItemId);
             exceptionSelection = null;
+            exceptionBulkAddMessage = null;
         }
         ImGui.EndDisabled();
+        ImGui.SameLine();
+        ImGui.BeginDisabled(controller.Busy);
+        if (ImGui.Button("Add current inventory"))
+            dispatch(AddCurrentInventoryToExceptions);
+        ImGui.EndDisabled();
+        if (exceptionBulkAddMessage is { Length: > 0 } bulkMessage)
+            ImGui.TextDisabled(bulkMessage);
 
         ImGui.Separator();
         ImGui.TextUnformatted($"Excluded items · {config.ExcludedItemIds.Count}");
@@ -499,6 +506,36 @@ internal sealed class MainWindow : Window
             }
         }
         ImGui.EndChild();
+    }
+
+    private void AddCurrentInventoryToExceptions()
+    {
+        if (controller.Busy) return;
+        controller.SnapshotExceptionInventory();
+        if (controller.ExceptionInventorySnapshotError is { } snapshotError)
+        {
+            exceptionBulkAddMessage = $"Could not add current inventory: {snapshotError}";
+            return;
+        }
+
+        var itemIds = controller.ExceptionInventoryCandidates
+            .Select(item => item.ItemId)
+            .Distinct()
+            .ToList();
+        var newItemIds = itemIds.Where(itemId => !config.ExcludedItemIds.Contains(itemId)).ToList();
+        if (newItemIds.Count > 0)
+        {
+            config.ExcludedItemIds.AddRange(newItemIds);
+            config.Normalize();
+            foreach (var itemId in newItemIds)
+                controller.ExcludeItem(itemId);
+            save();
+        }
+
+        exceptionSelection = null;
+        exceptionBulkAddMessage = itemIds.Count == 0
+            ? "No marketable inventory items to add; untradeable and nonmarketable items are skipped automatically."
+            : $"Added {newItemIds.Count} inventory item(s); {itemIds.Count - newItemIds.Count} were already excluded.";
     }
 
     private void DrawBatchSelling()
