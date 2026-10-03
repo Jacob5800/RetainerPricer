@@ -12,7 +12,8 @@ using System.Runtime.InteropServices;
 
 namespace RetainerPricer;
 
-public sealed record MarketSession(ulong ContentId, ulong RetainerId, uint WorldId, string WorldName);
+public sealed record MarketSession(ulong ContentId, ulong RetainerId, uint WorldId, string WorldName,
+    string? DataCenterName = null);
 
 public sealed record SellItem(MarketSession Session, uint ItemId, string Name, bool IsHq,
     uint Quantity, uint CurrentPrice, int InventoryType, int Slot, long DialogGeneration = 0)
@@ -72,7 +73,7 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     public MarketWorld? GetHomeWorld()
     {
         if (disposed || !player.IsLoaded || player.ContentId == 0 || player.HomeWorld.RowId == 0) return null;
-        return new MarketWorld(player.HomeWorld.RowId, player.HomeWorld.Value.Name.ToString());
+        return new MarketWorld(player.HomeWorld.RowId, player.HomeWorld.Value.Name.ToString(), GetHomeDataCenterName());
     }
 
     public NativeMarketBridge(IGameGui gameGui, IDataManager data, IPlayerState player,
@@ -150,9 +151,16 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         if (!list->IsVisible && (sell == null || !sell->IsReady))
             return false;
         session = new MarketSession(player.ContentId, active->RetainerId,
-            player.CurrentWorld.RowId, player.CurrentWorld.Value.Name.ToString());
+            player.CurrentWorld.RowId, player.CurrentWorld.Value.Name.ToString(), GetHomeDataCenterName());
         error = string.Empty;
         return true;
+    }
+
+    private string? GetHomeDataCenterName()
+    {
+        if (!player.IsLoaded || player.HomeWorld.RowId == 0) return null;
+        var dataCenter = player.HomeWorld.Value.DataCenter;
+        return dataCenter.RowId == 0 ? null : dataCenter.Value.Name.ToString();
     }
 
     public bool TryReadSellItem(out SellItem item, out string error)

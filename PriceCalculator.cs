@@ -16,14 +16,16 @@ public static class PriceCalculator
         IReadOnlySet<ulong> ownRetainerIds,
         uint minimumPrice,
         DateTimeOffset now,
-        TimeSpan? maxAge)
+        TimeSpan? maxAge,
+        string? dataCenterName = null)
     {
         static PriceProposal Fail(string message, uint lowest = 0, int count = 0) => new(lowest, 0, count, message);
 
         if (snapshot is null || itemId == 0 || worldId == 0)
             return Fail("Select an item and selling world, then fetch prices.");
-        if (snapshot.ItemId != itemId || snapshot.WorldId != worldId)
-            return Fail("These prices belong to another item or world. Fetch prices again.");
+        if (snapshot.ItemId != itemId || snapshot.WorldId != worldId ||
+            !StringComparer.OrdinalIgnoreCase.Equals(snapshot.DataCenterName, dataCenterName))
+            return Fail("These prices belong to another item or market scope. Fetch prices again.");
         if (snapshot.Source is not (PriceSource.Local or PriceSource.Universalis))
             return Fail("The price source is not recognized. Fetch prices again.");
         if (!snapshot.IsComplete)

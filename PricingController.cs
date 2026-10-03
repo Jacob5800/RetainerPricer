@@ -17,7 +17,6 @@ internal sealed class PricingController : IDisposable
     private readonly PluginConfig config;
     private readonly IReadOnlySet<uint> marketableItemIds;
     private CancellationTokenSource cancellation = new();
-    private readonly Dictionary<(uint World, uint Item), PriceSnapshot> cache = [];
     private Task<PriceSnapshot>? quoteTask;
     private Work work;
     private Step step;
@@ -116,6 +115,8 @@ internal sealed class PricingController : IDisposable
     {
         if (Busy) return;
         if (item.ItemId == 0 || world.WorldId == 0) { Status = "Choose a valid item and wait for your home-world data."; return; }
+        if (config.UseDataCenterPrices && string.IsNullOrWhiteSpace(world.DataCenterName))
+        { Status = "Could not identify your home world's Data Center. No price lookup was started."; return; }
         ResetRequest();
         manualTarget = new ManualQuoteTarget(item, isHq, world);
         ManualSnapshot = null;
@@ -273,7 +274,6 @@ internal sealed class PricingController : IDisposable
         work = Work.Scan;
         index = 0;
         step = Step.Start;
-        cache.Clear();
         workSource = PriceSource.Universalis;
         Status = $"Automatically checking and updating {items.Count} eligible listing(s) with Universalis ({excluded} excluded, {unmarketable} not marketable). Items without a competing listing or a sale in the last 20 days will be left unchanged.";
     }
@@ -286,7 +286,9 @@ internal sealed class PricingController : IDisposable
         if (step == Step.Start)
         {
             deadline = now.AddSeconds(25);
-            quoteTask = universalis.FetchAsync(manualTarget.World.WorldId, manualTarget.Item.ItemId, cancellation.Token);
+            quoteTask = universalis.FetchAsync(manualTarget.World.WorldId, manualTarget.Item.ItemId,
+                cancellation.Token, config.UniversalisCacheMinutes,
+                config.UseDataCenterPrices ? manualTarget.World.DataCenterName : null);
             step = Step.Quote;
         }
         if (quoteTask is { IsCompleted: true } task)
@@ -301,7 +303,8 @@ internal sealed class PricingController : IDisposable
             if (ManualSnapshot is null) { FinishManual("Universalis returned no price data."); return; }
             var hasOwnRetainerIds = bridge.TryGetOwnRetainerIds(out var ownRetainerIds);
             ManualProposal = Calculate(ManualSnapshot, manualTarget.Item.ItemId, manualTarget.World.WorldId,
-                manualTarget.IsHq, ownRetainerIds);
+                manualTarget.IsHq, ownRetainerIds,
+                config.UseDataCenterPrices ? manualTarget.World.DataCenterName : null);
             if (!hasOwnRetainerIds)
                 ManualQuoteWarning = "Your retainer IDs have not loaded, so this read-only quote may include your own listing. Open any retainer list before relying on the undercut price.";
             else if (!ManualProposal.CanApply && ManualProposal.Error?.Contains("did not include its retainer ID", StringComparison.OrdinalIgnoreCase) == true)
@@ -664,7 +667,6 @@ internal sealed class PricingController : IDisposable
         row.Status = !row.Proposal.CanApply ? row.Proposal.Error!
             : row.Proposal.SuggestedPrice == row.Item.CurrentPrice ? "Already priced"
             : "Ready";
-        cache[(row.Item.Session.WorldId, row.Item.ItemId)] = snapshot;
         step = Step.Closing;
     }
 
@@ -680,7 +682,13 @@ internal sealed class PricingController : IDisposable
         error = "";
         deadline = now.AddSeconds(25);
         if (workSource == PriceSource.Universalis)
-            quoteTask = universalis.FetchAsync(item.Session.WorldId, item.ItemId, cancellation.Token);
+        {
+            if (config.UseDataCenterPrices && string.IsNullOrWhiteSpace(item.Session.DataCenterName))
+            { error = "Could not identify your home world's Data Center. No price lookup was started."; return false; }
+            quoteTask = universalis.FetchAsync(item.Session.WorldId, item.ItemId,
+                cancellation.Token, config.UniversalisCacheMinutes,
+                config.UseDataCenterPrices ? item.Session.DataCenterName : null);
+        }
         else
         {
             if (!bridge.RequestCompare(item, out error)) return false;
@@ -712,12 +720,15 @@ internal sealed class PricingController : IDisposable
     }
 
     private PriceProposal Calculate(PriceSnapshot snapshot, SellItem item)
-        => Calculate(snapshot, item.ItemId, item.Session.WorldId, item.IsHq, bridge.OwnRetainerIds());
+        => Calculate(snapshot, item.ItemId, item.Session.WorldId, item.IsHq, bridge.OwnRetainerIds(),
+            snapshot.Source == PriceSource.Universalis && config.UseDataCenterPrices
+                ? item.Session.DataCenterName : null);
 
     private PriceProposal Calculate(PriceSnapshot snapshot, uint itemId, uint worldId, bool isHq,
-        IReadOnlySet<ulong> ownRetainerIds)
+        IReadOnlySet<ulong> ownRetainerIds, string? dataCenterName = null)
         => PriceCalculator.Calculate(snapshot, itemId, worldId, isHq, ownRetainerIds, (uint)config.MinimumPrice,
-            DateTimeOffset.UtcNow, config.UseMaximumPriceAge ? TimeSpan.FromMinutes(config.MaximumAgeMinutes) : null);
+            DateTimeOffset.UtcNow, config.UseMaximumPriceAge ? TimeSpan.FromMinutes(config.MaximumAgeMinutes) : null,
+            dataCenterName);
 
     private bool IsExcluded(uint itemId) => config.ExcludedItemIds.Contains(itemId);
 

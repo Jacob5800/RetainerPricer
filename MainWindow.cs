@@ -36,7 +36,11 @@ internal sealed class MainWindow : Window
 
     public override void Draw()
     {
-        ImGui.TextWrapped("One gil below the lowest matching listing on your home world. HQ and NQ are compared separately; your own retainers are excluded.");
+        var world = homeWorld();
+        var priceScope = config.UseDataCenterPrices
+            ? world?.DataCenterName is { Length: > 0 } dcName ? $"the {dcName} data center" : "your home-world data center"
+            : "your home world";
+        ImGui.TextWrapped($"Universalis prices use {priceScope}. HQ and NQ are compared separately; your own retainers are excluded.");
         if (retainerError() is { } nativeError) ImGui.TextWrapped(nativeError);
         var busy = controller.Busy;
         ImGui.BeginDisabled(busy);
@@ -143,7 +147,7 @@ internal sealed class MainWindow : Window
 
     private void DrawExisting()
     {
-        ImGui.TextWrapped("The Update existing listings button checks each eligible listing against the live local marketboard, sets it one gil below the lowest comparable listing, then verifies the retainer accepted the change. Rows without a safe price are left untouched.");
+        ImGui.TextWrapped("The Update existing listings button checks each eligible listing against Universalis, sets it one gil below the lowest comparable listing, then verifies the retainer accepted the change. Rows without a safe price are left untouched.");
         if (controller.ExistingUpdateError is { } updateError) ImGui.TextWrapped(updateError);
         if (controller.ExistingApplyError is { } applyError) ImGui.TextWrapped(applyError);
         if (controller.Rows.Count == 0) return;
@@ -198,6 +202,19 @@ internal sealed class MainWindow : Window
             if (ImGui.InputInt("Maximum age (minutes)", ref age))
             { config.MaximumAgeMinutes = age; config.Normalize(); save(); }
         }
+        var cacheMinutes = config.UniversalisCacheMinutes;
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.InputInt("Reuse Universalis cache (minutes; 0 = off)", ref cacheMinutes))
+        { config.UniversalisCacheMinutes = cacheMinutes; config.Normalize(); save(); }
+        ImGui.TextDisabled(config.UniversalisCacheMinutes == 0
+            ? "Always fetch fresh Universalis data."
+            : $"Reuse successful Universalis responses for up to {config.UniversalisCacheMinutes} minutes in this session, for the same item and market scope.");
+        var useDataCenter = config.UseDataCenterPrices;
+        if (ImGui.Checkbox("Use lowest price in the Data Center", ref useDataCenter))
+        { config.UseDataCenterPrices = useDataCenter; save(); }
+        ImGui.TextDisabled(config.UseDataCenterPrices
+            ? "Universalis checks listings across your home world's Data Center for automatic pricing and manual lookups. Local marketboard checks always stay on your home world."
+            : "Universalis checks your home world only. Turn this on to include listings across your Data Center.");
         var open = config.OpenWithRetainer;
         if (ImGui.Checkbox("Open this window with the retainer selling list", ref open)) { config.OpenWithRetainer = open; save(); }
         ImGui.EndDisabled();
@@ -208,7 +225,7 @@ internal sealed class MainWindow : Window
 
     private void DrawManualLookup()
     {
-        ImGui.TextWrapped("Search any item and retrieve its home-world price from Universalis without opening a retainer sale window. This lookup is read-only; it never changes a listing.");
+        ImGui.TextWrapped("Search any item and retrieve its home-world or Data Center price from Universalis without opening a retainer sale window. This lookup is read-only; it never changes a listing.");
         ImGui.SetNextItemWidth(360);
         ImGui.InputText("Search item", ref lookupSearch, 128);
         if (!StringComparer.CurrentCultureIgnoreCase.Equals(lookupSearch, lookupSearchCache))
@@ -256,7 +273,10 @@ internal sealed class MainWindow : Window
                     ImGui.TextUnformatted($"Lowest retrieved matching listing: {comparable.Min(listing => listing.PricePerUnit):N0} gil each");
                 else
                     ImGui.TextUnformatted("No matching HQ/NQ listings were included in this response.");
-                ImGui.TextUnformatted($"Received {snapshot.Listings.Count:N0} listings on {world?.Name ?? "the home world"}.");
+                var resultScope = config.UseDataCenterPrices
+                    ? world?.DataCenterName ?? "the Data Center"
+                    : world?.Name ?? "the home world";
+                ImGui.TextUnformatted($"Received {snapshot.Listings.Count:N0} listings for {resultScope}.");
                 if (controller.ManualProposal is { } proposal)
                 {
                     if (proposal.CanApply)
@@ -480,7 +500,9 @@ internal sealed class MainWindow : Window
         var history = snapshot.Source != PriceSource.Universalis ? ""
             : snapshot.MostRecentSaleAt is { } saleAt ? $" · last sale {Age(saleAt)} ago"
             : " · no sale in the last 20 days";
-        ImGui.TextUnformatted($"{snapshot.Source}: {Age(snapshot.ObservedAt)} old · {snapshot.ObservedAt.ToLocalTime():HH:mm:ss}{history}");
+        var cached = snapshot.WasCached && snapshot.RetrievedAt is { } retrievedAt
+            ? $" · cached {Age(retrievedAt)} ago" : "";
+        ImGui.TextUnformatted($"{snapshot.Source}: {Age(snapshot.ObservedAt)} old · {snapshot.ObservedAt.ToLocalTime():HH:mm:ss}{history}{cached}");
     }
 
     private static string Age(DateTimeOffset time)

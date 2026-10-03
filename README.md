@@ -12,7 +12,9 @@ Dalamud API 15 plugin for pricing items in the retainer sale window.
 
 Prices compare HQ and NQ separately, exclude all of your retainers, and target one gil below the lowest usable competing listing. Inventory snapshots read the four carried inventory bags; untradeable items and items without a marketboard search category are skipped automatically. The optional maximum-age filter is off by default. Use the **Exceptions** tab to grab carried inventory, filter item names, select an item from the dropdown, and add or remove persistent exclusions. Excluded items are skipped by both automatic actions, while manual lookups remain available. The on-screen **Check price again** source can use the local marketboard. Automatic batches use Universalis; the batch waits for sale windows and listing updates to reach the expected state, and stops safely if the game UI does not.
 
-Universalis requests are on demand and are limited to the selected item and home world. Items are left unchanged when Universalis has no matching current listing or no sale from the previous 20 days. The plugin does not upload player or market data.
+Successful Universalis responses are cached in memory for 5 minutes by default, keyed by market scope and item. Change the cache window or turn it off in **Settings**; the optional price-upload age filter remains independent. **Use lowest price in the Data Center** is an optional setting, off by default; when enabled, Universalis pricing uses all listings on the home world's Data Center. Local marketboard checks remain limited to the home world.
+
+Universalis requests are on demand and are limited to the selected item and the configured market scope. Items are left unchanged when Universalis has no matching current listing or no sale from the previous 20 days. The plugin does not upload player or market data.
 
 ## Install
 

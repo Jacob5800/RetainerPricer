@@ -10,15 +10,18 @@ using System.Threading.Tasks;
 
 namespace RetainerPricer;
 
-/// <summary>Fetches one item on one world when requested. Never uploads or polls.</summary>
+/// <summary>Fetches one item for a requested world or data center. Never uploads or polls.</summary>
 public sealed class UniversalisClient : IDisposable
 {
     private const int MaximumResponseBytes = 1_048_576;
     private const int HistoryEntryLimit = 100;
     private const int HistoryWindowSeconds = 20 * 24 * 60 * 60;
+    private const int MaximumCachedItems = 512;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
     private readonly HttpClient client;
     private readonly bool ownsClient;
+    private readonly object cacheLock = new();
+    private readonly Dictionary<(string Scope, uint Item), PriceSnapshot> cache = [];
 
     public UniversalisClient() : this(new HttpClient(new HttpClientHandler
     {
@@ -34,10 +37,32 @@ public sealed class UniversalisClient : IDisposable
         this.ownsClient = ownsClient;
     }
 
-    public async Task<PriceSnapshot> FetchAsync(uint worldId, uint itemId, CancellationToken ct = default)
+    public async Task<PriceSnapshot> FetchAsync(uint worldId, uint itemId, CancellationToken ct = default,
+        int cacheMinutes = 5, string? dataCenterName = null)
     {
         if (worldId == 0 || itemId == 0)
             throw new ArgumentException("Select a valid item and selling world before fetching prices.");
+        if (dataCenterName is { Length: 0 }) dataCenterName = null;
+        if (dataCenterName is { Length: > 64 } || dataCenterName?.Contains('/') == true)
+            throw new ArgumentException("The home world's data-center name is invalid.");
+        ct.ThrowIfCancellationRequested();
+
+        var cacheAgeLimit = TimeSpan.FromMinutes(Math.Clamp(cacheMinutes, 0, 60));
+        var scopeKey = dataCenterName is null ? $"world:{worldId}" : $"dc:{dataCenterName.ToUpperInvariant()}";
+        var key = (scopeKey, itemId);
+        if (cacheAgeLimit > TimeSpan.Zero)
+        {
+            lock (cacheLock)
+            {
+                if (cache.TryGetValue(key, out var cached) && cached.RetrievedAt is { } retrievedAt)
+                {
+                    var age = DateTimeOffset.UtcNow - retrievedAt;
+                    if (age >= TimeSpan.Zero && age <= cacheAgeLimit)
+                        return cached with { WasCached = true };
+                    cache.Remove(key);
+                }
+            }
+        }
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(RequestTimeout);
@@ -45,7 +70,7 @@ public sealed class UniversalisClient : IDisposable
         {
             // https://docs.universalis.app/ — current listings and sales in the previous 20 days.
             using var request = new HttpRequestMessage(HttpMethod.Get,
-                $"https://universalis.app/api/v2/{worldId}/{itemId}?entries={HistoryEntryLimit}&entriesWithin={HistoryWindowSeconds}");
+                $"https://universalis.app/api/v2/{Uri.EscapeDataString(dataCenterName ?? worldId.ToString(CultureInfo.InvariantCulture))}/{itemId}?entries={HistoryEntryLimit}&entriesWithin={HistoryWindowSeconds}");
             request.Headers.UserAgent.ParseAdd("RetainerPricer/0.1");
             request.Headers.Accept.ParseAdd("application/json");
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
@@ -75,7 +100,18 @@ public sealed class UniversalisClient : IDisposable
                     throw new InvalidOperationException("Universalis returned too much market data. Try this item again later.");
                 buffer.Write(chunk, 0, read);
             }
-            return Parse(buffer.ToArray(), worldId, itemId);
+            var result = Parse(buffer.ToArray(), worldId, itemId, dataCenterName) with
+            { RetrievedAt = DateTimeOffset.UtcNow, WasCached = false };
+            lock (cacheLock)
+            {
+                if (!cache.ContainsKey(key) && cache.Count >= MaximumCachedItems)
+                {
+                    var oldestKey = cache.MinBy(entry => entry.Value.RetrievedAt ?? DateTimeOffset.MinValue).Key;
+                    cache.Remove(oldestKey);
+                }
+                cache[key] = result;
+            }
+            return result;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -91,7 +127,7 @@ public sealed class UniversalisClient : IDisposable
         }
     }
 
-    private static PriceSnapshot Parse(byte[] json, uint worldId, uint itemId)
+    private static PriceSnapshot Parse(byte[] json, uint worldId, uint itemId, string? dataCenterName)
     {
         static InvalidOperationException Invalid(string detail) => new("Universalis returned unusable market data: " + detail);
         static uint UInt(JsonElement row, string property)
@@ -112,8 +148,16 @@ public sealed class UniversalisClient : IDisposable
             using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 32 });
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object) throw Invalid("expected an item response.");
-            if (UInt(root, "itemID") != itemId || UInt(root, "worldID") != worldId)
-                throw Invalid("the item or world does not match the request.");
+            if (UInt(root, "itemID") != itemId)
+                throw Invalid("the item does not match the request.");
+            if (dataCenterName is null)
+            {
+                if (UInt(root, "worldID") != worldId)
+                    throw Invalid("the world does not match the request.");
+            }
+            else if (!root.TryGetProperty("dcName", out var dc) || dc.ValueKind != JsonValueKind.String ||
+                     !StringComparer.OrdinalIgnoreCase.Equals(dc.GetString(), dataCenterName))
+                throw Invalid("the data center does not match the request.");
             if (root.TryGetProperty("hasData", out var hasData) && hasData.ValueKind == JsonValueKind.False)
                 throw new InvalidOperationException("Universalis has not received market data for this item and world yet.");
             if (!root.TryGetProperty("lastUploadTime", out var upload) || !upload.TryGetInt64(out var milliseconds) || milliseconds <= 0)
@@ -131,8 +175,10 @@ public sealed class UniversalisClient : IDisposable
                 var price = UInt(listing, "pricePerUnit");
                 var quantity = UInt(listing, "quantity");
                 if (price is 0 or > PriceCalculator.MaximumPrice || quantity == 0) throw Invalid("invalid listing price or quantity.");
-                if (listing.TryGetProperty("worldID", out _) && UInt(listing, "worldID") != worldId)
-                    throw Invalid("a listing belongs to another world.");
+                if (listing.TryGetProperty("worldID", out var listingWorld) &&
+                    (!listingWorld.TryGetUInt32(out var listingWorldId) || listingWorldId == 0 ||
+                     (dataCenterName is null && listingWorldId != worldId)))
+                    throw Invalid("a listing belongs to another market scope.");
                 if (listing.TryGetProperty("itemID", out _) && UInt(listing, "itemID") != itemId)
                     throw Invalid("a listing belongs to another item.");
                 // Universalis documents retainerID as optional. Keep the market response readable
@@ -169,7 +215,7 @@ public sealed class UniversalisClient : IDisposable
 
             // Use upload age, never request completion time, to detect stale cached prices.
             return new(itemId, worldId, PriceSource.Universalis, observedAt, results.AsReadOnly(),
-                totalCount == results.Count, mostRecentSaleAt);
+                totalCount == results.Count, mostRecentSaleAt, DataCenterName: dataCenterName);
         }
         catch (JsonException ex)
         {
@@ -187,6 +233,7 @@ public sealed class UniversalisClient : IDisposable
 
     public void Dispose()
     {
+        lock (cacheLock) cache.Clear();
         if (ownsClient) client.Dispose();
     }
 }
