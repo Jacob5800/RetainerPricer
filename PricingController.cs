@@ -97,15 +97,41 @@ internal sealed class PricingController : IDisposable
     public void Update()
     {
         var now = DateTimeOffset.UtcNow;
+        if (work != Work.Idle)
+        {
+            if (bridge.TryConsumeGameNetworkError(out var networkErrorToken))
+            {
+                Cancel($"Stopped because the game returned a market/network error token (0x{networkErrorToken:X8}).");
+                return;
+            }
+            if (bridge.IsClientStateUnavailable)
+            {
+                Cancel("Stopped because the character disconnected, began loading, or started logging out.");
+                return;
+            }
+            if (work != Work.Manual &&
+                (session is null || !bridge.TryGetSession(out var active, out _) || active != session))
+            {
+                Cancel("Stopped because the retainer window closed or the character, world, or retainer changed.");
+                return;
+            }
+            if ((work is Work.Single or Work.Scan or Work.BatchListing) && workingItem is not null &&
+                step != Step.Confirming && !bridge.IsSellWindowVisible)
+            {
+                Cancel("Stopped because the retainer's item window was closed.");
+                return;
+            }
+        }
+        else
+        {
+            // Ignore late callback errors from a request that completed after its operation ended.
+            bridge.TryConsumeGameNetworkError(out _);
+        }
+
         if (now < nextTick) return;
         nextTick = now.AddMilliseconds(250);
         CurrentItem = bridge.TryReadSellItem(out var selected, out _) ? selected : null;
         if (work == Work.Manual) { TickManual(now); return; }
-        if (work != Work.Idle && (session is null || !bridge.TryGetSession(out var active, out _) || active != session))
-        {
-            Cancel("Stopped because the character, world or retainer changed.");
-            return;
-        }
         if (work == Work.Idle)
         {
             if (CurrentItem is { } item && item.DialogGeneration != seenDialog)
