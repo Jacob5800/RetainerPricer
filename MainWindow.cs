@@ -114,8 +114,8 @@ internal sealed class MainWindow : Window
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
         ImGui.BeginDisabled(controller.Busy);
         var automatic = config.AutoPriceNewListings;
-        if (ImGui.Checkbox("Automatically price new listings", ref automatic)) { config.AutoPriceNewListings = automatic; save(); }
-        ImGui.TextDisabled("For batch actions, use the two buttons above; no price review or manual item entry is needed.");
+        if (ImGui.Checkbox("Automatically price and confirm new listings", ref automatic)) { config.AutoPriceNewListings = automatic; save(); }
+        ImGui.TextDisabled("When enabled, a newly opened eligible sale window is priced with Universalis and submitted automatically. Use Start listing items to process all eligible carried inventory.");
         var source = (int)PriceSource.Universalis;
         ImGui.SetNextItemWidth(250);
         ImGui.Combo("On-screen price check source", ref source, "Universalis\0");
