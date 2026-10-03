@@ -263,7 +263,9 @@ internal sealed class PricingController : IDisposable
     {
         if (Busy) return false;
         if (!bridge.TryOpenInventoryItem(item, out var error)) { Status = error; return false; }
-        Status = $"Opened {item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")} for listing. Confirm the sale in game.";
+        Status = config.AutoPriceNewListings
+            ? $"Opened {item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")} for automatic pricing and listing."
+            : $"Opened {item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")} for listing. Confirm the sale in game.";
         return true;
     }
 
@@ -282,6 +284,15 @@ internal sealed class PricingController : IDisposable
         if (!marketableItemIds.Contains(target.ItemId))
         { Status = "This item is not marketable and will be skipped."; return; }
         if (IsExcluded(target.ItemId)) { Status = $"{target.Name} is in the item exception list and will be skipped."; return; }
+        if (fillAutomatically)
+        {
+            if (!bridge.TryGetOwnRetainerIds(out _))
+            { Status = "Automatic listing stopped because your retainer IDs are not ready. Open the retainer selling list and try again; no sale was submitted."; return; }
+            var currentListings = bridge.ReadExistingListings(out var listingsError);
+            if (listingsError.Length > 0)
+            { Status = $"Automatic listing stopped because the current retainer stock could not be verified: {listingsError}"; return; }
+            preListingSlots = currentListings.Select(item => item.Slot).ToHashSet();
+        }
         workingItem = target;
         session = target.Session;
         CurrentItem = target;
@@ -381,6 +392,11 @@ internal sealed class PricingController : IDisposable
 
     private void TickSingle(DateTimeOffset now)
     {
+        if (step == Step.Confirming)
+        {
+            TickSingleConfirmation(now);
+            return;
+        }
         if (workingItem is null || CurrentItem is null || !SameDialog(workingItem, CurrentItem))
         { Cancel("The selling item changed; the old price lookup was discarded."); return; }
         if (step == Step.Start)
@@ -389,14 +405,72 @@ internal sealed class PricingController : IDisposable
             step = Step.Quote;
         }
         if (!ReadRequest(workingItem, now, out var snapshot, out var failure)) return;
-        work = Work.Idle;
-        if (snapshot is null) { Status = failure; return; }
+        if (snapshot is null)
+        {
+            work = Work.Idle;
+            autoApply = false;
+            Status = failure;
+            return;
+        }
         CurrentSnapshot = snapshot;
         CurrentProposal = Calculate(snapshot, workingItem);
         if (workSource == PriceSource.Local && !bridge.TryCloseCompare(workingItem, out var closeError))
         { Cancel(closeError); return; }
-        Status = CurrentProposal.CanApply ? $"Suggested price: {CurrentProposal.SuggestedPrice:N0} gil each." : CurrentProposal.Error!;
-        if (autoApply && CurrentProposal.CanApply) FillCurrent();
+        if (!CurrentProposal.CanApply)
+        {
+            work = Work.Idle;
+            autoApply = false;
+            Status = CurrentProposal.Error!;
+            return;
+        }
+        if (!autoApply)
+        {
+            work = Work.Idle;
+            Status = $"Suggested price: {CurrentProposal.SuggestedPrice:N0} gil each.";
+            return;
+        }
+
+        listingSubmittedPrice = CurrentProposal.SuggestedPrice;
+        if (!bridge.TryConfirmNewListing(workingItem, listingSubmittedPrice, out var confirmError))
+        { Cancel($"Automatic listing stopped before confirming {workingItem.Name}: {confirmError}"); return; }
+        deadline = now.AddSeconds(12);
+        step = Step.Confirming;
+        Status = $"Submitted {workingItem.Name} at {listingSubmittedPrice:N0} gil each. Waiting for the retainer list to confirm it.";
+    }
+
+    private void TickSingleConfirmation(DateTimeOffset now)
+    {
+        if (workingItem is not { } submitted)
+        { Cancel("Automatic listing stopped because its confirmation target was lost."); return; }
+
+        var sellWindowOpen = bridge.IsSellWindowVisible;
+        if (sellWindowOpen && bridge.TryReadSellItem(out var open, out _) && !SameDialog(submitted, open))
+        {
+            Cancel($"The sale window changed after submitting {submitted.Name}. Check the retainer list before trying again.");
+            return;
+        }
+
+        var listed = bridge.ReadExistingListings(out var readError);
+        if (readError.Length == 0 && !sellWindowOpen && listed.Any(row => !preListingSlots.Contains(row.Slot)
+                && row.ItemId == submitted.ItemId && row.IsHq == submitted.IsHq
+                && row.Quantity == submitted.Quantity && row.CurrentPrice == listingSubmittedPrice))
+        {
+            work = Work.Idle;
+            workingItem = null;
+            autoApply = false;
+            preListingSlots.Clear();
+            ResetRequest();
+            Status = $"Listed {submitted.Name} at {listingSubmittedPrice:N0} gil each.";
+            return;
+        }
+
+        if (now > deadline)
+        {
+            var detail = sellWindowOpen
+                ? "The sale window is still open; the plugin did not submit a second confirmation. Check the dialog before continuing."
+                : "The retainer list did not show the new listing. Check the retainer before trying again to avoid a duplicate.";
+            Cancel($"Could not verify the listing for {submitted.Name}. {detail}");
+        }
     }
 
     private void TickScan(DateTimeOffset now)
@@ -848,6 +922,7 @@ internal sealed class PricingController : IDisposable
     public void Cancel(string message = "Stopped. Already submitted price changes remain applied.")
     {
         var wasBatchListing = work == Work.BatchListing;
+        var wasSingleListing = work == Work.Single && autoApply;
         ResetRequest();
         work = Work.Idle;
         manualTarget = null;
@@ -857,6 +932,12 @@ internal sealed class PricingController : IDisposable
             batchSellingOnly = false;
             listingCandidate = null;
             workingItem = null;
+        }
+        else if (wasSingleListing)
+        {
+            workingItem = null;
+            autoApply = false;
+            preListingSlots.Clear();
         }
         Status = message;
     }
