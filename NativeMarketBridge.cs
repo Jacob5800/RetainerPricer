@@ -1,5 +1,6 @@
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -31,6 +32,8 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     private readonly IGameGui gameGui;
     private readonly IDataManager data;
     private readonly IPlayerState player;
+    private readonly IClientState clientState;
+    private readonly ICondition condition;
     private readonly IAddonLifecycle lifecycle;
     private readonly IPluginLog log;
     private readonly OpenRetainerSellDelegate? openRetainerSell;
@@ -42,6 +45,7 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     private bool resultReceived;
     private bool requestComplete;
     private int expectedListingCount;
+    private int gameNetworkErrorToken;
     private string localError = "Compare prices in the current sell window first.";
     private nint sellAddress;
     private bool sellWasVisible;
@@ -61,6 +65,9 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     public string? ItemSelectorAvailabilityError { get; private set; }
     public bool IsComparisonVisible => IsAddonVisible("ItemSearchResult");
     public bool IsSellWindowVisible => GetSellAddon() != null;
+    public bool IsClientStateUnavailable => !clientState.IsLoggedIn || !player.IsLoaded || player.ContentId == 0 ||
+        condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51] ||
+        condition[ConditionFlag.LoggingOut] || condition[ConditionFlag.SystemError];
     public bool IsLocalSearchBusy
     {
         get
@@ -77,11 +84,14 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     }
 
     public NativeMarketBridge(IGameGui gameGui, IDataManager data, IPlayerState player,
-        IAddonLifecycle lifecycle, IGameInteropProvider interop, ISigScanner scanner, IPluginLog log)
+        IClientState clientState, ICondition condition, IAddonLifecycle lifecycle,
+        IGameInteropProvider interop, ISigScanner scanner, IPluginLog log)
     {
         this.gameGui = gameGui;
         this.data = data;
         this.player = player;
+        this.clientState = clientState;
+        this.condition = condition;
         this.lifecycle = lifecycle;
         this.log = log;
         retainerFieldsSupported = RetainerAgentView.IsSupported;
@@ -683,6 +693,9 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     {
         try
         {
+            if (error != 0)
+                Interlocked.Exchange(ref gameNetworkErrorToken, error);
+
             if (compareItem != null && proxy != null && proxy->SearchItemId == compareItem.ItemId)
             {
                 resultReceived = error == 0;
@@ -695,6 +708,12 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         }
         catch (Exception ex) { log.Error(ex, "Tracking local market request status failed."); }
         resultHook!.Original(proxy, count, error);
+    }
+
+    public bool TryConsumeGameNetworkError(out int token)
+    {
+        token = Interlocked.Exchange(ref gameNetworkErrorToken, 0);
+        return token != 0;
     }
 
     private void OnEndRequest(InfoProxyItemSearch* proxy)
