@@ -41,7 +41,7 @@ public sealed class Plugin : IDalamudPlugin
             .ToHashSet();
         controller = new PricingController(bridge, universalis, config, marketableItemIds);
         window = new MainWindow(config, controller, itemChoices, bridge.GetHomeWorld, Save, Dispatch,
-            () => bridge.LocalAvailabilityError, () => bridge.RetainerAvailabilityError);
+            () => bridge.RetainerAvailabilityError);
         windows.AddWindow(window);
         if (bridge.LocalAvailabilityError is { } localCompatibilityError)
             log.Warning("Retainer Pricer local pricing: {Error}", localCompatibilityError);

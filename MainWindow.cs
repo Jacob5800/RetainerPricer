@@ -6,13 +6,13 @@ namespace RetainerPricer;
 
 internal sealed class MainWindow : Window
 {
+    private const string EmptyBatchListPopup = "Batch selling list is empty.";
     private readonly PluginConfig config;
     private readonly PricingController controller;
     private readonly IReadOnlyList<ItemChoice> itemChoices;
     private readonly Func<MarketWorld?> homeWorld;
     private readonly Action save;
     private readonly Action<Action> dispatch;
-    private readonly Func<string?> localError;
     private readonly Func<string?> retainerError;
     private string lookupSearch = "";
     private string lookupSearchCache = "";
@@ -32,10 +32,15 @@ internal sealed class MainWindow : Window
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
         Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
-        Func<string?> localError, Func<string?> retainerError) : base("Retainer Pricer")
+        Func<string?> retainerError) : base("Retainer Pricer")
     {
-        (this.config, this.controller, this.itemChoices, this.homeWorld, this.save, this.dispatch, this.localError, this.retainerError) =
-            (config, controller, itemChoices, homeWorld, save, dispatch, localError, retainerError);
+        (this.config, this.controller, this.itemChoices, this.homeWorld, this.save, this.dispatch, this.retainerError) =
+            (config, controller, itemChoices, homeWorld, save, dispatch, retainerError);
+        if (config.Source != PriceSource.Universalis)
+        {
+            config.Source = PriceSource.Universalis;
+            save();
+        }
         Size = new Vector2(860, 640);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -78,8 +83,18 @@ internal sealed class MainWindow : Window
             ImGui.Button("Batch selling only...");
             ImGui.PopStyleColor(3);
         }
-        else if (ImGui.Button("Start batch selling only")) dispatch(controller.StartBatchSellingOnly);
+        else if (ImGui.Button("Start batch selling only"))
+        {
+            if (config.BatchSaleQuantities.Count == 0) ImGui.OpenPopup(EmptyBatchListPopup);
+            else dispatch(controller.StartBatchSellingOnly);
+        }
         ImGui.EndDisabled();
+        if (ImGui.BeginPopupModal(EmptyBatchListPopup, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.TextUnformatted(EmptyBatchListPopup);
+            if (ImGui.Button("OK")) ImGui.CloseCurrentPopup();
+            ImGui.EndPopup();
+        }
         if (busy)
         {
             ImGui.SameLine();
@@ -97,19 +112,12 @@ internal sealed class MainWindow : Window
         var automatic = config.AutoPriceNewListings;
         if (ImGui.Checkbox("Automatically price new listings", ref automatic)) { config.AutoPriceNewListings = automatic; save(); }
         ImGui.TextDisabled("For batch actions, use the two buttons above; no price review or manual item entry is needed.");
-        var source = (int)config.Source;
+        var source = (int)PriceSource.Universalis;
         ImGui.SetNextItemWidth(250);
-        if (ImGui.Combo("On-screen price check source", ref source, "Universalis\0Local marketboard\0"))
-        { config.Source = (PriceSource)source; save(); }
-        if (config.Source == PriceSource.Universalis)
-            ImGui.TextWrapped(config.UseMaximumPriceAge
-                ? $"This source applies to Check price again on an open selling window. Universalis upload data older than {config.MaximumAgeMinutes} minutes is skipped. Automatic listing actions also require a sale in the last 20 days."
-                : "This source applies to Check price again on an open selling window. Upload age is not filtered; automatic listing actions always use Universalis and require sales in the last 20 days.");
-        else
-        {
-            ImGui.TextWrapped("This source applies only to Check price again on an open selling window. Automatic new listings and existing-listing updates always use Universalis.");
-            if (localError() is { } error) ImGui.TextWrapped(error);
-        }
+        ImGui.Combo("On-screen price check source", ref source, "Universalis\0");
+        ImGui.TextWrapped(config.UseMaximumPriceAge
+            ? $"Check price again uses Universalis. Upload data older than {config.MaximumAgeMinutes} minutes is skipped. Automatic listing actions also require a sale in the last 20 days."
+            : "Check price again uses Universalis. Upload age is not filtered; automatic listing actions also require sales in the last 20 days.");
         ImGui.EndDisabled();
         ImGui.Separator();
 
