@@ -27,7 +27,8 @@ public sealed record PriceSnapshot(
     DateTimeOffset? MostRecentSaleAt = null,
     DateTimeOffset? RetrievedAt = null,
     bool WasCached = false,
-    string? DataCenterName = null);
+    string? DataCenterName = null,
+    string? RegionName = null);
 
 public sealed record PriceProposal(uint LowestPrice, uint SuggestedPrice, int MatchingListings, string? Error)
 {

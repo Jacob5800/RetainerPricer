@@ -50,7 +50,9 @@ internal sealed class MainWindow : Window
     public override void Draw()
     {
         var world = homeWorld();
-        var priceScope = config.UseDataCenterPrices
+        var priceScope = config.UseRegionPrices
+            ? "your home-world region and Materia (Oceania)"
+            : config.UseDataCenterPrices
             ? world?.DataCenterName is { Length: > 0 } dcName ? $"the {dcName} data center" : "your home-world data center"
             : "your home world";
         ImGui.TextWrapped($"Universalis prices use {priceScope}. HQ and NQ are compared separately; your own retainers are excluded.");
@@ -244,10 +246,16 @@ internal sealed class MainWindow : Window
             : $"Reuse successful Universalis responses for up to {config.UniversalisCacheMinutes} minutes in this session, for the same item and market scope.");
         var useDataCenter = config.UseDataCenterPrices;
         if (ImGui.Checkbox("Use lowest price in the Data Center", ref useDataCenter))
-        { config.UseDataCenterPrices = useDataCenter; save(); }
+        { config.UseDataCenterPrices = useDataCenter; if (useDataCenter) config.UseRegionPrices = false; save(); }
         ImGui.TextDisabled(config.UseDataCenterPrices
             ? "Universalis checks listings across your home world's Data Center for automatic pricing and manual lookups. Local marketboard checks always stay on your home world."
-            : "Universalis checks your home world only. Turn this on to include listings across your Data Center.");
+            : "Off by default. Turn this on to include listings across your home world's Data Center.");
+        var useRegion = config.UseRegionPrices;
+        if (ImGui.Checkbox("Use lowest price in region", ref useRegion))
+        { config.UseRegionPrices = useRegion; if (useRegion) config.UseDataCenterPrices = false; save(); }
+        ImGui.TextDisabled(config.UseRegionPrices
+            ? "Universalis checks all Data Centers in your home-world region plus Materia (Oceania). This also applies to automatic pricing and manual lookups; it is mutually exclusive with Data Center pricing."
+            : "Off by default. Turn this on to include every Data Center in your home-world region and Materia (Oceania).");
         var open = config.OpenWithRetainer;
         if (ImGui.Checkbox("Open this window with the retainer selling list", ref open)) { config.OpenWithRetainer = open; save(); }
         ImGui.EndDisabled();
@@ -258,7 +266,7 @@ internal sealed class MainWindow : Window
 
     private void DrawManualLookup()
     {
-        ImGui.TextWrapped("Search any item and retrieve its home-world or Data Center price from Universalis without opening a retainer sale window. This lookup is read-only; it never changes a listing.");
+        ImGui.TextWrapped("Search any item and retrieve its Universalis price from your selected market scope without opening a retainer sale window. This lookup is read-only; it never changes a listing.");
         ImGui.SetNextItemWidth(360);
         ImGui.InputText("Search item", ref lookupSearch, 128);
         if (!StringComparer.CurrentCultureIgnoreCase.Equals(lookupSearch, lookupSearchCache))
@@ -306,9 +314,9 @@ internal sealed class MainWindow : Window
                     ImGui.TextUnformatted($"Lowest retrieved matching listing: {comparable.Min(listing => listing.PricePerUnit):N0} gil each");
                 else
                     ImGui.TextUnformatted("No matching HQ/NQ listings were included in this response.");
-                var resultScope = config.UseDataCenterPrices
-                    ? world?.DataCenterName ?? "the Data Center"
-                    : world?.Name ?? "the home world";
+                var resultScope = snapshot.RegionName
+                    ?? (config.UseDataCenterPrices ? world?.DataCenterName ?? "the Data Center"
+                        : world?.Name ?? "the home world");
                 ImGui.TextUnformatted($"Received {snapshot.Listings.Count:N0} listings for {resultScope}.");
                 if (controller.ManualProposal is { } proposal)
                 {
@@ -737,4 +745,3 @@ internal sealed class MainWindow : Window
         return age.TotalMinutes >= 1 ? $"{Math.Max(0, (int)age.TotalMinutes)}m" : $"{Math.Max(0, (int)age.TotalSeconds)}s";
     }
 }
-

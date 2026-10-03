@@ -2,7 +2,7 @@
   "Author": "Jacob5800",
   "Name": "Retainer Pricer",
   "InternalName": "RetainerPricer",
-  "AssemblyVersion": "0.2.6.0",
+  "AssemblyVersion": "0.2.7.0",
   "Description": "Automatically price eligible inventory and reprice existing listings one gil below matching competition using Universalis market prices and recent sale history.",
   "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
   "ApplicableVersion": "any",
@@ -12,6 +12,5 @@
   "LoadSync": false,
   "CanUnloadAsync": true,
   "Punchline": "Automatically price new and existing retainer listings.",
-  "Changelog": "Existing listing updates now use a randomized 350–600 ms pause after each confirmed price change to let the retainer UI settle."
+  "Changelog": "Added an optional region-wide Universalis price scope covering the home region and Oceania (Materia)."
 }
-

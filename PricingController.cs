@@ -121,7 +121,7 @@ internal sealed class PricingController : IDisposable
     {
         if (Busy) return;
         if (item.ItemId == 0 || world.WorldId == 0) { Status = "Choose a valid item and wait for your home-world data."; return; }
-        if (config.UseDataCenterPrices && string.IsNullOrWhiteSpace(world.DataCenterName))
+        if ((config.UseDataCenterPrices || config.UseRegionPrices) && string.IsNullOrWhiteSpace(world.DataCenterName))
         { Status = "Could not identify your home world's Data Center. No price lookup was started."; return; }
         ResetRequest();
         manualTarget = new ManualQuoteTarget(item, isHq, world);
@@ -311,7 +311,8 @@ internal sealed class PricingController : IDisposable
             deadline = now.AddSeconds(25);
             quoteTask = universalis.FetchAsync(manualTarget.World.WorldId, manualTarget.Item.ItemId,
                 cancellation.Token, config.UniversalisCacheMinutes,
-                config.UseDataCenterPrices ? manualTarget.World.DataCenterName : null);
+                config.UseDataCenterPrices || config.UseRegionPrices ? manualTarget.World.DataCenterName : null,
+                config.UseRegionPrices);
             step = Step.Quote;
         }
         if (quoteTask is { IsCompleted: true } task)
@@ -327,7 +328,7 @@ internal sealed class PricingController : IDisposable
             var hasOwnRetainerIds = bridge.TryGetOwnRetainerIds(out var ownRetainerIds);
             ManualProposal = Calculate(ManualSnapshot, manualTarget.Item.ItemId, manualTarget.World.WorldId,
                 manualTarget.IsHq, ownRetainerIds,
-                config.UseDataCenterPrices ? manualTarget.World.DataCenterName : null);
+                config.UseDataCenterPrices || config.UseRegionPrices ? manualTarget.World.DataCenterName : null);
             if (!hasOwnRetainerIds)
                 ManualQuoteWarning = "Your retainer IDs have not loaded, so this read-only quote may include your own listing. Open any retainer list before relying on the undercut price.";
             else if (!ManualProposal.CanApply && ManualProposal.Error?.Contains("did not include its retainer ID", StringComparison.OrdinalIgnoreCase) == true)
@@ -755,11 +756,12 @@ internal sealed class PricingController : IDisposable
         deadline = now.AddSeconds(25);
         if (workSource == PriceSource.Universalis)
         {
-            if (config.UseDataCenterPrices && string.IsNullOrWhiteSpace(item.Session.DataCenterName))
+            if ((config.UseDataCenterPrices || config.UseRegionPrices) && string.IsNullOrWhiteSpace(item.Session.DataCenterName))
             { error = "Could not identify your home world's Data Center. No price lookup was started."; return false; }
             quoteTask = universalis.FetchAsync(item.Session.WorldId, item.ItemId,
                 cancellation.Token, config.UniversalisCacheMinutes,
-                config.UseDataCenterPrices ? item.Session.DataCenterName : null);
+                config.UseDataCenterPrices || config.UseRegionPrices ? item.Session.DataCenterName : null,
+                config.UseRegionPrices);
         }
         else
         {
@@ -793,7 +795,7 @@ internal sealed class PricingController : IDisposable
 
     private PriceProposal Calculate(PriceSnapshot snapshot, SellItem item)
         => Calculate(snapshot, item.ItemId, item.Session.WorldId, item.IsHq, bridge.OwnRetainerIds(),
-            snapshot.Source == PriceSource.Universalis && config.UseDataCenterPrices
+            snapshot.Source == PriceSource.Universalis && (config.UseDataCenterPrices || config.UseRegionPrices)
                 ? item.Session.DataCenterName : null);
 
     private PriceProposal Calculate(PriceSnapshot snapshot, uint itemId, uint worldId, bool isHq,
@@ -838,4 +840,3 @@ internal sealed class PricingController : IDisposable
 
     public void Dispose() { cancellation.Cancel(); cancellation.Dispose(); }
 }
-
