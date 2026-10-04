@@ -6,5 +6,5 @@ public sealed record SniperSalesSnapshot(uint ItemId, uint WorldId, DateTimeOffs
     IReadOnlyList<SniperQualityBaseline> Qualities);
 
 public sealed record SniperDeal(string Key, uint ItemId, string ItemName, uint WorldId, string WorldName,
-    bool IsHq, uint PricePerUnit, uint Quantity, uint MedianSalePrice, int Sales14Days,
-    DateTimeOffset DetectedAt, string? ListingId);
+    bool IsHq, uint PricePerUnit, uint Quantity, uint MedianSalePrice, int SalesInHistoryWindow,
+    DateTimeOffset DetectedAt, string? ListingId, bool IsOneGilAlert = false);

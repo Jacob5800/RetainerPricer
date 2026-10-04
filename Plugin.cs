@@ -43,8 +43,9 @@ public sealed class Plugin : IDalamudPlugin
             .Where(item => item.RowId != 0 && !item.IsUntradable && item.ItemSearchCategory.RowId != 0)
             .Select(item => item.RowId)
             .ToHashSet();
+        var marketableItemChoices = itemChoices.Where(item => marketableItemIds.Contains(item.ItemId)).ToArray();
         controller = new PricingController(bridge, universalis, config, marketableItemIds);
-        sniper = new SniperMonitor(universalis, config, itemChoices);
+        sniper = new SniperMonitor(universalis, config, marketableItemChoices);
         window = new MainWindow(config, controller, itemChoices, bridge.GetHomeWorld, Save, Dispatch,
             () => bridge.RetainerAvailabilityError, feedback, sniper);
         windows.AddWindow(window);

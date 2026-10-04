@@ -7,6 +7,7 @@ namespace RetainerPricer;
 internal sealed class MainWindow : Window
 {
     private const string EmptyBatchListPopup = "Batch selling list is empty.";
+    private const string PriceDropReviewPopup = "Review large price drop";
     private readonly PluginConfig config;
     private readonly PricingController controller;
     private readonly IReadOnlyList<ItemChoice> itemChoices;
@@ -40,10 +41,6 @@ internal sealed class MainWindow : Window
     private string feedbackMessage = "";
     private string? feedbackStatus;
     private bool feedbackSending;
-    private string sniperSearch = "";
-    private string sniperSearchCache = "";
-    private List<ItemChoice> sniperMatches = [];
-    private ItemChoice? sniperSelection;
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
         Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
@@ -155,6 +152,7 @@ internal sealed class MainWindow : Window
         {
             if (!string.IsNullOrEmpty(controller.Progress)) ImGui.TextUnformatted(controller.Progress);
         }
+        DrawPriceDropReviewPopup();
         if (ImGui.BeginTabBar("##pricingTabs"))
         {
             if (ImGui.BeginTabItem("New / selected item")) { DrawCurrent(); ImGui.EndTabItem(); }
@@ -253,6 +251,33 @@ internal sealed class MainWindow : Window
         }
     }
 
+    private void DrawPriceDropReviewPopup()
+    {
+        var row = controller.PriceDropReviewItem;
+        if (row is null) return;
+
+        ImGui.OpenPopup(PriceDropReviewPopup);
+        if (!ImGui.BeginPopupModal(PriceDropReviewPopup, ImGuiWindowFlags.AlwaysAutoResize)) return;
+        ImGui.TextWrapped("The proposed price is more than 50% below this listing's current price. It was skipped while the rest of this retainer was processed.");
+        ImGui.Separator();
+        ImGui.TextUnformatted($"{row.Item.Name}{(row.Item.IsHq ? " (HQ)" : " (NQ)")}");
+        ImGui.TextUnformatted($"Current: {row.Item.CurrentPrice:N0} gil each");
+        ImGui.TextUnformatted($"Proposed: {row.Proposal?.SuggestedPrice:N0} gil each");
+        ImGui.TextDisabled("Approving retrieves the price again and applies only the fresh result. Auto update will continue to the next retainer after all held items are reviewed.");
+        if (ImGui.Button("Still undercut regardless"))
+        {
+            ImGui.CloseCurrentPopup();
+            dispatch(controller.ApprovePriceDrop);
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("Ignore"))
+        {
+            ImGui.CloseCurrentPopup();
+            dispatch(controller.IgnorePriceDrop);
+        }
+        ImGui.EndPopup();
+    }
+
     private void DrawSettings()
     {
         ImGui.BeginDisabled(controller.Busy);
@@ -310,7 +335,7 @@ internal sealed class MainWindow : Window
         ImGui.TextUnformatted("Top buttons");
         ImGui.BulletText("Auto update: start from the retainer picker to visit retainers top-to-bottom, or start from any retainer's selling list to process that one first. It visits each retainer once; unavailable retainers are skipped. Stop halts the run; already submitted changes remain applied.");
         ImGui.BulletText("Start listing items: checks eligible items in your carried inventory and lists them one by one. No sale exceeds 99 items; larger stacks continue in follow-up listings. Exclusions, untradeable items, and items the market does not support are skipped. The run stops when it finishes or the retainer's 20 listing slots are full.");
-        ImGui.BulletText("Update existing listings: reprices eligible listings on the currently open retainer. It checks the market price and recent sales, then applies and verifies a safe price. Items without a usable competitor or a sale in the last 20 days are skipped.");
+        ImGui.BulletText("Update existing listings: reprices eligible listings on the currently open retainer. A suggested price more than 50% below your current price is held for review at the end of that retainer; approve it to recheck and apply, or ignore it. Auto update pauses at the same review before moving to the next retainer.");
         ImGui.BulletText("Start batch selling only: lists only the items in the Batch selling tab. It ignores other inventory, respects each item's per-listing size and optional per-run total, and caps each sale at 99 items before continuing the remainder.");
         ImGui.BulletText("Stop: stops further actions in the current run. Any price changes already submitted remain in place.");
 
@@ -322,7 +347,7 @@ internal sealed class MainWindow : Window
         ImGui.BulletText("Exceptions: items here are skipped by automatic listing and repricing. Refresh carried inventory to find items, filter by name, add a selected item, or add the current marketable inventory at once. Remove an item to allow it again.");
         ImGui.BulletText("Don't reprice: block price changes to existing listings through Update existing listings, Auto update, or the current-item price controls. Read-only lookups still work. These items can still be listed from your carried inventory; use Exceptions to skip both listing and repricing.");
         ImGui.BulletText("Batch selling: choose items and set the maximum quantity in each listing. The optional total limit caps how much of that item is listed in one batch-only run; 0 means no total cap. Add current inventory adds marketable carried items using the current size and limit.");
-        ImGui.BulletText("Sniper: add items to a watchlist, then listen for new Universalis listings on your home world. Alerts use each quality's median unit sale price from the previous 14 days and your minimum-sales rule. Sniper only shows deals; purchases are manual.");
+        ImGui.BulletText("Sniper: Start watching scans all marketable items on your home world in batches of up to 100, spacing history queries at least one second apart, then listens for new listings. Set a 3–14 day sale-history window and deal threshold. New 1-gil listings are flagged for manual review; the plugin never buys automatically.");
         ImGui.BulletText("Settings: set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, and optionally compare across your Data Center or region. Data Center and region options cannot be used together.");
 
         ImGui.Separator();
@@ -350,8 +375,8 @@ internal sealed class MainWindow : Window
 
     private void DrawSniper()
     {
-        ImGui.TextWrapped("Watch selected items for new Universalis listings priced below their recent sold-price median. Sniper creates deal alerts only; you choose and buy items manually in game.");
-        ImGui.TextDisabled("The live feed watches your home world. HQ and NQ have separate 14-day sale medians and sales counts.");
+        ImGui.TextWrapped("Start watching to scan every marketable item on your home world, then listen for new listings. Sniper highlights deals and 1-gil listings for you to review; it never buys automatically.");
+        ImGui.TextDisabled("History is requested in batches of up to 100 items, with at least 1 second between batch requests. The all-item scan can take a little while; Stop watching cancels it.");
 
         var isRunning = sniper.IsRunning;
         ImGui.BeginDisabled(isRunning);
@@ -364,83 +389,34 @@ internal sealed class MainWindow : Window
             save();
         }
         ImGui.SameLine();
+        var historyDays = config.SniperHistoryDays;
+        ImGui.SetNextItemWidth(130);
+        if (ImGui.InputInt("History days (3–14)", ref historyDays))
+        {
+            config.SniperHistoryDays = historyDays;
+            config.Normalize();
+            save();
+        }
+        ImGui.SameLine();
         var minimumSales = config.SniperMinimumSales14Days;
         ImGui.SetNextItemWidth(100);
-        if (ImGui.InputInt("Minimum sales (14d)", ref minimumSales))
+        if (ImGui.InputInt("Minimum sales in window", ref minimumSales))
         {
             config.SniperMinimumSales14Days = minimumSales;
             config.Normalize();
             save();
         }
 
-        ImGui.Separator();
-        ImGui.TextUnformatted("Watchlist");
-        ImGui.SetNextItemWidth(340);
-        ImGui.InputText("Search item", ref sniperSearch, 128);
-        if (!StringComparer.CurrentCultureIgnoreCase.Equals(sniperSearch, sniperSearchCache))
-            sniperSelection = null;
-        RefreshMatches(sniperSearch, ref sniperSearchCache, ref sniperMatches);
-        if (!string.IsNullOrWhiteSpace(sniperSearch) && sniperMatches.Count > 0)
-        {
-            ImGui.BeginChild("##sniperMatches", new Vector2(0, Math.Min(130, sniperMatches.Count * 22 + 8)), true);
-            foreach (var candidate in sniperMatches)
-            {
-                ImGui.PushID((int)candidate.ItemId);
-                if (ImGui.Selectable($"{candidate.Name}  ·  #{candidate.ItemId}", sniperSelection?.ItemId == candidate.ItemId))
-                {
-                    sniperSelection = candidate;
-                    sniperSearch = candidate.Name;
-                    sniperSearchCache = sniperSearch;
-                    sniperMatches = [];
-                }
-                ImGui.PopID();
-            }
-            ImGui.EndChild();
-        }
-        else if (sniperSearch.Trim().Length >= 2)
-            ImGui.TextDisabled("No item names match that search.");
-
-        var watchedIds = config.SniperWatchlistItemIds.ToHashSet();
-        ImGui.BeginDisabled(sniperSelection is null || watchedIds.Contains(sniperSelection?.ItemId ?? 0) || watchedIds.Count >= 100);
-        if (ImGui.Button("Add to watchlist") && sniperSelection is { } selected && !watchedIds.Contains(selected.ItemId))
-        {
-            config.SniperWatchlistItemIds.Add(selected.ItemId);
-            config.Normalize();
-            save();
-        }
-        ImGui.EndDisabled();
-        ImGui.SameLine();
-        ImGui.TextDisabled($"{watchedIds.Count}/100 items · add items you want to monitor");
         ImGui.EndDisabled();
 
         ImGui.Separator();
-        ImGui.TextUnformatted($"Watched items · {config.SniperWatchlistItemIds.Count}");
-        if (config.SniperWatchlistItemIds.Count == 0)
-            ImGui.TextDisabled("Add at least one item before starting the live feed.");
-        else
-        {
-            ImGui.BeginDisabled(isRunning);
-            foreach (var itemId in config.SniperWatchlistItemIds.ToArray())
-            {
-                var name = itemNamesForUi(itemId);
-                ImGui.PushID((int)itemId);
-                ImGui.TextUnformatted($"{name}  ·  #{itemId}");
-                ImGui.SameLine();
-                if (ImGui.SmallButton("Remove"))
-                {
-                    config.SniperWatchlistItemIds.Remove(itemId);
-                    config.Normalize();
-                    save();
-                }
-                ImGui.PopID();
-            }
-            ImGui.EndDisabled();
-        }
+        ImGui.TextUnformatted($"Search scope · all {sniper.MarketableItemCount:N0} marketable items on your home world");
+        ImGui.TextDisabled("Start watching fetches the configured sales window in 100-item calls, builds separate HQ/NQ medians, then opens the live listing feed.");
 
         ImGui.Separator();
         var world = homeWorld();
-        ImGui.BeginDisabled(isRunning || world is null || config.SniperWatchlistItemIds.Count == 0);
-        if (ImGui.Button("Start listening")) sniper.Start(world);
+        ImGui.BeginDisabled(isRunning || world is null);
+        if (ImGui.Button("Start watching")) sniper.Start(world);
         ImGui.EndDisabled();
         if (sniper.IsRunning)
         {
@@ -448,11 +424,11 @@ internal sealed class MainWindow : Window
             ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.68f, 0.12f, 0.12f, 1));
             ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.82f, 0.18f, 0.18f, 1));
             ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.55f, 0.08f, 0.08f, 1));
-            if (ImGui.Button("Stop listening")) sniper.Stop();
+            if (ImGui.Button("Stop watching")) sniper.Stop();
             ImGui.PopStyleColor(3);
         }
         ImGui.TextWrapped(sniper.Status);
-        ImGui.TextDisabled($"Rules: listing ≤ {config.SniperThresholdFraction:P1} of the 14-day median unit sale price, with at least {config.SniperMinimumSales14Days} sales of that quality. No automated purchase is made.");
+        ImGui.TextDisabled($"Deals: listing ≤ {config.SniperThresholdFraction:P1} of the {config.SniperHistoryDays}-day HQ/NQ median, with at least {config.SniperMinimumSales14Days} sales in that window. Up to 1,800 recent sales are used per item. New 1-gil listings are highlighted; purchases are manual.");
 
         var deals = sniper.Deals;
         ImGui.Separator();
@@ -468,7 +444,7 @@ internal sealed class MainWindow : Window
             ImGui.TableSetupColumn("Item");
             ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 58);
             ImGui.TableSetupColumn("Listing", ImGuiTableColumnFlags.WidthFixed, 82);
-            ImGui.TableSetupColumn("14d median", ImGuiTableColumnFlags.WidthFixed, 88);
+            ImGui.TableSetupColumn($"{config.SniperHistoryDays}d median", ImGuiTableColumnFlags.WidthFixed, 88);
             ImGui.TableSetupColumn("Sales", ImGuiTableColumnFlags.WidthFixed, 52);
             ImGui.TableSetupColumn("Seen", ImGuiTableColumnFlags.WidthFixed, 68);
             ImGui.TableSetupScrollFreeze(0, 1);
@@ -476,18 +452,22 @@ internal sealed class MainWindow : Window
             foreach (var deal in deals)
             {
                 ImGui.TableNextRow();
-                ImGui.TableNextColumn(); ImGui.TextWrapped($"{deal.ItemName} · {deal.WorldName} · qty {deal.Quantity}");
+                ImGui.TableNextColumn();
+                if (deal.IsOneGilAlert)
+                    ImGui.TextColored(new Vector4(1f, 0.35f, 0.25f, 1f), $"1 GIL ALERT · {deal.ItemName} · {deal.WorldName} · qty {deal.Quantity}");
+                else
+                    ImGui.TextWrapped($"{deal.ItemName} · {deal.WorldName} · qty {deal.Quantity}");
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.IsHq ? "HQ" : "NQ");
-                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.PricePerUnit.ToString("N0"));
-                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.MedianSalePrice.ToString("N0"));
-                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.Sales14Days.ToString("N0"));
+                ImGui.TableNextColumn();
+                if (deal.IsOneGilAlert) ImGui.TextColored(new Vector4(1f, 0.35f, 0.25f, 1f), $"{deal.PricePerUnit:N0}");
+                else ImGui.TextUnformatted(deal.PricePerUnit.ToString("N0"));
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.MedianSalePrice > 0 ? deal.MedianSalePrice.ToString("N0") : "—");
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.SalesInHistoryWindow > 0 ? deal.SalesInHistoryWindow.ToString("N0") : "—");
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.DetectedAt.ToLocalTime().ToString("HH:mm:ss"));
             }
             ImGui.EndTable();
         }
     }
-
-    private string itemNamesForUi(uint itemId) => itemChoices.FirstOrDefault(item => item.ItemId == itemId)?.Name ?? "Unknown item";
 
     private void StartFeedbackSend()
     {

@@ -29,6 +29,13 @@ internal sealed class UniversalisWebSocketClient : IAsyncDisposable
             WebSocketMessageType.Binary, true, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task SubscribeWorldAsync(uint worldId, string change, CancellationToken cancellationToken)
+    {
+        var channel = $"listings/{change}{{world={worldId}}}";
+        await socket.SendAsync(new ArraySegment<byte>(BsonCodec.WriteSubscribe(channel, ++subscriptionId)),
+            WebSocketMessageType.Binary, true, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<UniversalisListing>?> ReceiveListingsAsync(CancellationToken cancellationToken)
     {
         using var buffer = new MemoryStream();

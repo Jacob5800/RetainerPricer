@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
@@ -11,17 +12,24 @@ using System.Threading.Tasks;
 
 namespace RetainerPricer;
 
-/// <summary>Fetches one item for a requested world or data center. Never uploads or polls.</summary>
+/// <summary>Fetches Universalis market data and sale histories. Never uploads data or opens a live feed.</summary>
 public sealed class UniversalisClient : IDisposable
 {
     private enum ScopeKind { World, DataCenter, Region }
 
     private const int MaximumResponseBytes = 1_048_576;
-    private const int MaximumHistoryResponseBytes = 8 * 1_048_576;
+    private const int MaximumHistoryResponseBytes = 32 * 1_048_576;
     private const int HistoryEntryLimit = 100;
     private const int HistoryWindowSeconds = 20 * 24 * 60 * 60;
-    private const int SniperHistoryEntryLimit = 99_999;
-    private const int SniperHistoryWindowSeconds = 14 * 24 * 60 * 60;
+    private const int SniperHistoryEntryLimit = 1_800;
+    private const int UniversalisRequestsPerSecond = 25;
+    private static readonly TimeSpan HistoryRequestTimeout = TimeSpan.FromSeconds(60);
+    private static readonly SemaphoreSlim RequestRateGate = new(1, 1);
+    private static readonly SemaphoreSlim RequestConcurrencyGate = new(8, 8);
+    private static readonly SemaphoreSlim SniperHistoryBatchRateGate = new(1, 1);
+    private static long nextRequestTimestamp;
+    private static long nextSniperHistoryBatchTimestamp;
+    public const int SniperHistoryBatchSize = 100;
     private const int MaximumCachedItems = 512;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
     private readonly HttpClient client;
@@ -135,17 +143,21 @@ public sealed class UniversalisClient : IDisposable
         }
     }
 
-    public async Task<SniperSalesSnapshot> FetchSniperSalesAsync(uint worldId, uint itemId, CancellationToken ct = default)
+    public async Task<IReadOnlyDictionary<uint, SniperSalesSnapshot>> FetchSniperSalesBatchAsync(
+        uint worldId, IReadOnlyList<uint> itemIds, int historyDays, CancellationToken ct = default)
     {
-        if (worldId == 0 || itemId == 0)
-            throw new ArgumentException("Select a valid item and selling world before fetching sales history.");
+        if (worldId == 0 || itemIds.Count is 0 or > SniperHistoryBatchSize || itemIds.Any(itemId => itemId == 0))
+            throw new ArgumentException($"Select 1 to {SniperHistoryBatchSize} valid items and a selling world before fetching sales history.");
+        historyDays = Math.Clamp(historyDays, 3, 14);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        deadline.CancelAfter(RequestTimeout);
+        deadline.CancelAfter(HistoryRequestTimeout);
         try
         {
-            var path = $"history/{worldId}/{itemId}?entriesToReturn={SniperHistoryEntryLimit}&entriesWithin={SniperHistoryWindowSeconds}";
+            var itemIdsPath = string.Join(',', itemIds.Distinct());
+            var historyWindowSeconds = historyDays * 24 * 60 * 60;
+            var path = $"history/{worldId}/{itemIdsPath}?entriesToReturn={SniperHistoryEntryLimit}&entriesWithin={historyWindowSeconds}";
             var json = await RequestHistoryJsonAsync(path, deadline.Token).ConfigureAwait(false);
-            return ParseSniperSales(json, worldId, itemId, DateTimeOffset.UtcNow);
+            return ParseSniperSalesBatch(json, worldId, itemIds, historyDays, DateTimeOffset.UtcNow);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -166,31 +178,39 @@ public sealed class UniversalisClient : IDisposable
         using var request = new HttpRequestMessage(HttpMethod.Get, $"https://universalis.app/api/v2/{path}");
         request.Headers.UserAgent.ParseAdd("RetainerPricer/0.4");
         request.Headers.Accept.ParseAdd("application/json");
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        if (response.StatusCode == HttpStatusCode.TooManyRequests)
-            throw new InvalidOperationException("Universalis has temporarily limited sales-history requests. Wait a moment, then retry.");
-        if (response.StatusCode == HttpStatusCode.NotFound)
-            throw new InvalidOperationException("Universalis has no sales history for this item and world.");
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"Universalis returned HTTP {(int)response.StatusCode} for sales history.");
-        if (response.Content.Headers.ContentLength > MaximumHistoryResponseBytes)
-            throw new InvalidOperationException("Universalis returned too much sales history for this item.");
-
-        await using var source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        using var buffer = new MemoryStream();
-        var chunk = new byte[16_384];
-        while (true)
+        await RequestConcurrencyGate.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            var read = await source.ReadAsync(chunk, ct).ConfigureAwait(false);
-            if (read == 0) break;
-            if (buffer.Length + read > MaximumHistoryResponseBytes)
-                throw new InvalidOperationException("Universalis returned too much sales history for this item.");
-            buffer.Write(chunk, 0, read);
+            await WaitForRequestSlotAsync(ct).ConfigureAwait(false);
+            await WaitForSniperHistoryBatchSlotAsync(ct).ConfigureAwait(false);
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                throw new InvalidOperationException("Universalis has temporarily limited sales-history requests. Wait a moment, then retry.");
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                throw new InvalidOperationException("Universalis has no sales history for this item batch and world.");
+            if (!response.IsSuccessStatusCode)
+                throw new InvalidOperationException($"Universalis returned HTTP {(int)response.StatusCode} for sales history.");
+            if (response.Content.Headers.ContentLength > MaximumHistoryResponseBytes)
+                throw new InvalidOperationException("Universalis returned too much sales history for this item batch.");
+
+            await using var source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var buffer = new MemoryStream();
+            var chunk = new byte[16_384];
+            while (true)
+            {
+                var read = await source.ReadAsync(chunk, ct).ConfigureAwait(false);
+                if (read == 0) break;
+                if (buffer.Length + read > MaximumHistoryResponseBytes)
+                    throw new InvalidOperationException("Universalis returned too much sales history for this item batch.");
+                buffer.Write(chunk, 0, read);
+            }
+            return buffer.ToArray();
         }
-        return buffer.ToArray();
+        finally { RequestConcurrencyGate.Release(); }
     }
 
-    private static SniperSalesSnapshot ParseSniperSales(byte[] json, uint worldId, uint itemId, DateTimeOffset retrievedAt)
+    private static IReadOnlyDictionary<uint, SniperSalesSnapshot> ParseSniperSalesBatch(
+        byte[] json, uint worldId, IReadOnlyList<uint> itemIds, int historyDays, DateTimeOffset retrievedAt)
     {
         try
         {
@@ -202,45 +222,64 @@ public sealed class UniversalisClient : IDisposable
                 (!returnedWorld.TryGetUInt32(out var parsedWorld) || parsedWorld != worldId))
                 throw new InvalidOperationException("Universalis sales history belongs to another world.");
 
-            var entryRoot = root;
+            var results = new Dictionary<uint, SniperSalesSnapshot>();
             if (root.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Object)
             {
-                if (!items.TryGetProperty(itemId.ToString(CultureInfo.InvariantCulture), out entryRoot))
-                    throw new InvalidOperationException("Universalis returned no sales history for this item.");
+                foreach (var itemId in itemIds.Distinct())
+                {
+                    if (!items.TryGetProperty(itemId.ToString(CultureInfo.InvariantCulture), out var entryRoot) ||
+                        entryRoot.ValueKind != JsonValueKind.Object ||
+                        !entryRoot.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array)
+                        continue;
+                    results[itemId] = new SniperSalesSnapshot(itemId, worldId, retrievedAt,
+                        ParseSniperQualities(entries, retrievedAt, historyDays));
+                }
             }
-            if (!entryRoot.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array)
+            else if (itemIds.Distinct().Take(2).Count() == 1 && root.TryGetProperty("entries", out var entries) &&
+                     entries.ValueKind == JsonValueKind.Array)
+            {
+                var itemId = itemIds.Distinct().Single();
+                results[itemId] = new SniperSalesSnapshot(itemId, worldId, retrievedAt,
+                    ParseSniperQualities(entries, retrievedAt, historyDays));
+            }
+            else if (itemIds.Distinct().Take(2).Count() == 1)
                 throw new InvalidOperationException("Universalis returned malformed sales history.");
-
-            var minimumTimestamp = retrievedAt.AddDays(-14).ToUnixTimeSeconds();
-            var prices = new Dictionary<bool, List<uint>> { [false] = [], [true] = [] };
-            foreach (var entry in entries.EnumerateArray())
-            {
-                if (entry.ValueKind != JsonValueKind.Object ||
-                    !entry.TryGetProperty("timestamp", out var timestamp) || !timestamp.TryGetInt64(out var seconds) ||
-                    seconds < minimumTimestamp || seconds > retrievedAt.ToUnixTimeSeconds() ||
-                    !entry.TryGetProperty("pricePerUnit", out var price) || !price.TryGetUInt32(out var gil) || gil == 0 ||
-                    !entry.TryGetProperty("hq", out var hq) || hq.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-                    continue;
-                prices[hq.GetBoolean()].Add(gil);
-            }
-
-            var qualities = new List<SniperQualityBaseline>(2);
-            foreach (var quality in prices)
-            {
-                if (quality.Value.Count == 0) continue;
-                quality.Value.Sort();
-                var middle = quality.Value.Count / 2;
-                var median = quality.Value.Count % 2 == 0
-                    ? (uint)(((ulong)quality.Value[middle - 1] + quality.Value[middle]) / 2)
-                    : quality.Value[middle];
-                qualities.Add(new SniperQualityBaseline(quality.Key, quality.Value.Count, median));
-            }
-            return new SniperSalesSnapshot(itemId, worldId, retrievedAt, qualities.AsReadOnly());
+            return results;
         }
         catch (JsonException ex)
         {
             throw new InvalidOperationException("Universalis returned malformed sales history.", ex);
         }
+    }
+
+    private static IReadOnlyList<SniperQualityBaseline> ParseSniperQualities(
+        JsonElement entries, DateTimeOffset retrievedAt, int historyDays)
+    {
+        var minimumTimestamp = retrievedAt.AddDays(-historyDays).ToUnixTimeSeconds();
+        var prices = new Dictionary<bool, List<uint>> { [false] = [], [true] = [] };
+        foreach (var entry in entries.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object ||
+                !entry.TryGetProperty("timestamp", out var timestamp) || !timestamp.TryGetInt64(out var seconds) ||
+                seconds < minimumTimestamp || seconds > retrievedAt.ToUnixTimeSeconds() ||
+                !entry.TryGetProperty("pricePerUnit", out var price) || !price.TryGetUInt32(out var gil) || gil == 0 ||
+                !entry.TryGetProperty("hq", out var hq) || hq.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                continue;
+            prices[hq.GetBoolean()].Add(gil);
+        }
+
+        var qualities = new List<SniperQualityBaseline>(2);
+        foreach (var quality in prices)
+        {
+            if (quality.Value.Count == 0) continue;
+            quality.Value.Sort();
+            var middle = quality.Value.Count / 2;
+            var median = quality.Value.Count % 2 == 0
+                ? (uint)(((ulong)quality.Value[middle - 1] + quality.Value[middle]) / 2)
+                : quality.Value[middle];
+            qualities.Add(new SniperQualityBaseline(quality.Key, quality.Value.Count, median));
+        }
+        return qualities.AsReadOnly();
     }
 
     private async Task<string> GetRegionForDataCenterAsync(string dataCenterName, CancellationToken ct)
@@ -301,34 +340,70 @@ public sealed class UniversalisClient : IDisposable
         using var request = new HttpRequestMessage(HttpMethod.Get, $"https://universalis.app/api/v2/{path}");
         request.Headers.UserAgent.ParseAdd("RetainerPricer/0.1");
         request.Headers.Accept.ParseAdd("application/json");
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+        await RequestConcurrencyGate.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            var wait = response.Headers.RetryAfter?.Delta;
-            var advice = wait is { TotalSeconds: > 0 }
-                ? $" Try again in {Math.Ceiling(wait.Value.TotalSeconds):N0} seconds."
-                : " Wait a moment, then try again.";
-            throw new InvalidOperationException("Universalis has temporarily limited requests." + advice);
-        }
-        if (response.StatusCode == HttpStatusCode.NotFound)
-            throw new InvalidOperationException($"Universalis has no market data for {scopeDescription}.");
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"Universalis returned HTTP {(int)response.StatusCode} for {scopeDescription}. Try again later.");
-        if (response.Content.Headers.ContentLength > MaximumResponseBytes)
-            throw new InvalidOperationException($"Universalis returned too much market data for {scopeDescription}. Try again later.");
-
-        await using var source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        using var buffer = new MemoryStream();
-        var chunk = new byte[16_384];
-        while (true)
-        {
-            var read = await source.ReadAsync(chunk, ct).ConfigureAwait(false);
-            if (read == 0) break;
-            if (buffer.Length + read > MaximumResponseBytes)
+            await WaitForRequestSlotAsync(ct).ConfigureAwait(false);
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                var wait = response.Headers.RetryAfter?.Delta;
+                var advice = wait is { TotalSeconds: > 0 }
+                    ? $" Try again in {Math.Ceiling(wait.Value.TotalSeconds):N0} seconds."
+                    : " Wait a moment, then try again.";
+                throw new InvalidOperationException("Universalis has temporarily limited requests." + advice);
+            }
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                throw new InvalidOperationException($"Universalis has no market data for {scopeDescription}.");
+            if (!response.IsSuccessStatusCode)
+                throw new InvalidOperationException($"Universalis returned HTTP {(int)response.StatusCode} for {scopeDescription}. Try again later.");
+            if (response.Content.Headers.ContentLength > MaximumResponseBytes)
                 throw new InvalidOperationException($"Universalis returned too much market data for {scopeDescription}. Try again later.");
-            buffer.Write(chunk, 0, read);
+
+            await using var source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            using var buffer = new MemoryStream();
+            var chunk = new byte[16_384];
+            while (true)
+            {
+                var read = await source.ReadAsync(chunk, ct).ConfigureAwait(false);
+                if (read == 0) break;
+                if (buffer.Length + read > MaximumResponseBytes)
+                    throw new InvalidOperationException($"Universalis returned too much market data for {scopeDescription}. Try again later.");
+                buffer.Write(chunk, 0, read);
+            }
+            return buffer.ToArray();
         }
-        return buffer.ToArray();
+        finally { RequestConcurrencyGate.Release(); }
+    }
+
+    private static async Task WaitForRequestSlotAsync(CancellationToken ct)
+    {
+        await RequestRateGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var now = Stopwatch.GetTimestamp();
+            var remainingTicks = nextRequestTimestamp - now;
+            if (remainingTicks > 0)
+                await Task.Delay(TimeSpan.FromSeconds((double)remainingTicks / Stopwatch.Frequency), ct).ConfigureAwait(false);
+            nextRequestTimestamp = Stopwatch.GetTimestamp() + Math.Max(1, Stopwatch.Frequency / UniversalisRequestsPerSecond);
+        }
+        finally { RequestRateGate.Release(); }
+    }
+
+    private static async Task WaitForSniperHistoryBatchSlotAsync(CancellationToken ct)
+    {
+        await SniperHistoryBatchRateGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var now = Stopwatch.GetTimestamp();
+            var next = Interlocked.Read(ref nextSniperHistoryBatchTimestamp);
+            var remainingTicks = next - now;
+            if (remainingTicks > 0)
+                await Task.Delay(TimeSpan.FromSeconds((double)remainingTicks / Stopwatch.Frequency), ct).ConfigureAwait(false);
+            Interlocked.Exchange(ref nextSniperHistoryBatchTimestamp,
+                Stopwatch.GetTimestamp() + Stopwatch.Frequency + Stopwatch.Frequency / 100);
+        }
+        finally { SniperHistoryBatchRateGate.Release(); }
     }
 
     private static PriceSnapshot CombineRegions(uint worldId, uint itemId, string homeDataCenter,

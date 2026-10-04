@@ -104,6 +104,41 @@ var empty = Body(); empty["listings"] = new JsonArray(); empty["listingsCount"] 
 var emptySnapshot = await FetchBody(empty);
 Assert(emptySnapshot.IsComplete && emptySnapshot.Listings.Count == 0, "An empty complete market is distinct from truncated data");
 
+var sniperItemIds = Enumerable.Range(4_000, UniversalisClient.SniperHistoryBatchSize).Select(id => (uint)id).ToArray();
+var sniperItems = new JsonObject();
+var saleTimestamp = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeSeconds();
+foreach (var itemId in sniperItemIds)
+    sniperItems[itemId.ToString()] = new JsonObject
+    {
+        ["entries"] = new JsonArray(new JsonObject
+        {
+            ["timestamp"] = saleTimestamp, ["pricePerUnit"] = 125, ["hq"] = false,
+        }),
+    };
+var sniperBatchBody = new JsonObject { ["worldID"] = 74, ["items"] = sniperItems };
+var sniperRequestTimes = new List<DateTimeOffset>();
+using (var http = new HttpClient(new StubHandler((request, _) =>
+       {
+           sniperRequestTimes.Add(DateTimeOffset.UtcNow);
+           var uri = request.RequestUri!;
+           var requestedIds = uri.AbsolutePath.Split('/').Last().Split(',');
+           Assert(request.Method == HttpMethod.Get && requestedIds.Length == UniversalisClient.SniperHistoryBatchSize,
+               "Sniper sends 100 item IDs in one history request");
+           Assert(uri.Query.Contains("entriesToReturn=1800", StringComparison.Ordinal) &&
+                  uri.Query.Contains("entriesWithin=604800", StringComparison.Ordinal),
+               "Sniper history request uses the configured lookback and per-item history limit");
+           return Task.FromResult(JsonResponse((JsonObject)sniperBatchBody.DeepClone()));
+       })))
+using (var client = new UniversalisClient(http))
+{
+    var firstBatch = await client.FetchSniperSalesBatchAsync(74, sniperItemIds, 7);
+    var secondBatch = await client.FetchSniperSalesBatchAsync(74, sniperItemIds, 7);
+    Assert(firstBatch.Count == sniperItemIds.Length && firstBatch[sniperItemIds[0]].Qualities.Single().MedianSalePrice == 125,
+        "Parse all items and sale baselines from the multi-item history response");
+    Assert(sniperRequestTimes.Count == 2 && sniperRequestTimes[1] - sniperRequestTimes[0] >= TimeSpan.FromSeconds(1),
+        "Space consecutive Sniper history batches by at least one second");
+}
+
 foreach (var property in new[] { "itemID", "worldID", "lastUploadTime", "listings", "listingsCount" })
 {
     var missing = Body(); missing.Remove(property);
@@ -126,7 +161,7 @@ foreach (var pair in new[] { ("worldID", 63), ("itemID", 5334) })
     await RejectFetch(() => FetchBody(wrong), "does not match", "Reject wrong API " + pair.Item1);
 }
 var wrongListingWorld = Body(); wrongListingWorld["listings"]![0]!["worldID"] = 63;
-await RejectFetch(() => FetchBody(wrongListingWorld), "another world", "Reject cross-world listing in world-specific response");
+await RejectFetch(() => FetchBody(wrongListingWorld), "another market scope", "Reject cross-world listing in world-specific response");
 foreach (var id in new string?[] { "", "legacy-hash", "0", "18446744073709551616", null })
 {
     var badRetainer = Body(); badRetainer["listings"]![0]!["retainerID"] = id;
@@ -148,12 +183,12 @@ await RejectFetch(() => Fetch((_, _) => Task.FromResult(new HttpResponseMessage(
 { Content = new StringContent("{broken") })), "malformed JSON", "Reject malformed JSON");
 await RejectFetch(() => Fetch((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.TooManyRequests)
 { Headers = { RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(30)) } })), "30 seconds", "Report rate limit retry time without retry loops");
-await RejectFetch(() => Fetch((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound))), "no data", "Report missing data");
+await RejectFetch(() => Fetch((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound))), "no market data", "Report missing data");
 await RejectFetch(() => Fetch((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable))), "503", "Report server failure");
 await RejectFetch(() => Fetch((_, _) => Task.FromException<HttpResponseMessage>(new HttpRequestException("network"))), "Could not reach", "Report network failure cleanly");
 await RejectFetch(() => Fetch((_, _) => Task.FromException<HttpResponseMessage>(new TaskCanceledException())), "in time", "Report request timeout");
 await RejectFetch(() => Fetch((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-{ Content = new StringContent(new string(' ', 1_048_577)) })), "unexpectedly large", "Bound oversized response");
+{ Content = new StringContent(new string(' ', 1_048_577)) })), "too much market data", "Bound oversized response");
 using (var cancellation = new CancellationTokenSource())
 {
     cancellation.Cancel();

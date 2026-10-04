@@ -9,5 +9,6 @@
     <Compile Include="../PricingModels.cs" Link="PricingModels.cs" />
     <Compile Include="../PriceCalculator.cs" Link="PriceCalculator.cs" />
     <Compile Include="../UniversalisClient.cs" Link="UniversalisClient.cs" />
+    <Compile Include="../SniperModels.cs" Link="SniperModels.cs" />
   </ItemGroup>
 </Project>

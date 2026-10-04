@@ -21,7 +21,7 @@ public sealed class PluginConfig : IPluginConfiguration
     public Dictionary<uint, uint> BatchSaleMaxQuantities { get; set; } = [];
     public double SniperThresholdFraction { get; set; } = 0.10;
     public int SniperMinimumSales14Days { get; set; } = 5;
-    public List<uint> SniperWatchlistItemIds { get; set; } = [];
+    public int SniperHistoryDays { get; set; } = 7;
 
     public void Normalize()
     {
@@ -38,7 +38,7 @@ public sealed class PluginConfig : IPluginConfiguration
             .ToDictionary(pair => pair.Key, pair => pair.Value == 0 ? 0 : (uint)Math.Clamp((long)pair.Value, 1, 999_999_999));
         SniperThresholdFraction = double.IsFinite(SniperThresholdFraction)
             ? Math.Clamp(SniperThresholdFraction, 0.01, 1.0) : 0.10;
-        SniperMinimumSales14Days = Math.Clamp(SniperMinimumSales14Days, 1, 100_000);
-        SniperWatchlistItemIds = (SniperWatchlistItemIds ?? []).Where(id => id != 0).Distinct().Take(100).ToList();
+        SniperMinimumSales14Days = Math.Clamp(SniperMinimumSales14Days, 1, 1_800);
+        SniperHistoryDays = Math.Clamp(SniperHistoryDays, 3, 14);
     }
 }

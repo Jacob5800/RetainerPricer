@@ -6,6 +6,8 @@ internal sealed class PriceRow(SellItem item)
     public PriceSnapshot? Snapshot { get; set; }
     public PriceProposal? Proposal { get; set; }
     public string Status { get; set; } = "Waiting";
+    public bool AwaitingPriceDropDecision { get; set; }
+    public bool PriceDropApproved { get; set; }
 }
 
 internal sealed class PricingController : IDisposable
@@ -88,6 +90,9 @@ internal sealed class PricingController : IDisposable
     public string? ExceptionInventorySnapshotError { get; private set; }
     public string? ListedSnapshotError { get; private set; }
     public List<PriceRow> Rows { get; } = [];
+    public PriceRow? PriceDropReviewItem => index >= Rows.Count && (work is Work.Scan or Work.AutoUpdateAllRetainers)
+        ? Rows.FirstOrDefault(row => row.AwaitingPriceDropDecision)
+        : null;
     public bool Busy => work != Work.Idle;
     public bool IsListingItemsRunning => work == Work.BatchListing;
     public bool IsBatchSellingOnlyRunning => work == Work.BatchListing && batchSellingOnly;
@@ -367,6 +372,31 @@ internal sealed class PricingController : IDisposable
         if (Rows.Count == 0) { Status = "All current listings are excluded, protected from repricing, or not marketable."; return; }
         work = Work.Scan;
         Status = $"Automatically checking and updating {Rows.Count} eligible listing(s) with Universalis ({excluded} excluded, {protectedCount} protected from repricing, {unmarketable} not marketable). Items without a competing listing or a sale in the last 20 days will be left unchanged.";
+    }
+
+    public void ApprovePriceDrop()
+    {
+        var row = PriceDropReviewItem;
+        if (row is null) return;
+        row.AwaitingPriceDropDecision = false;
+        row.PriceDropApproved = true;
+        row.Proposal = null;
+        row.Snapshot = null;
+        row.Status = "Approved; checking the price again before repricing.";
+        index = Rows.IndexOf(row);
+        step = Step.Start;
+        workingItem = null;
+        ResetRequest();
+        Status = $"Rechecking {row.Item.Name} after your approval. The plugin will apply only the current verified quote.";
+    }
+
+    public void IgnorePriceDrop()
+    {
+        var row = PriceDropReviewItem;
+        if (row is null) return;
+        row.AwaitingPriceDropDecision = false;
+        row.Status = "Ignored after price-drop review; listing left unchanged.";
+        Status = $"Ignored the large price drop for {row.Item.Name}; its listing was left unchanged.";
     }
 
     public void AutoUpdateAllRetainers()
@@ -736,6 +766,12 @@ internal sealed class PricingController : IDisposable
     {
         if (index >= Rows.Count)
         {
+            var pendingPriceDropCount = Rows.Count(row => row.AwaitingPriceDropDecision);
+            if (pendingPriceDropCount > 0)
+            {
+                Status = $"Review {pendingPriceDropCount} unusually large price drop(s) before continuing.";
+                return;
+            }
             var updated = Rows.Count(row => row.Status == "Updated");
             var unchanged = Rows.Count(row => row.Status == "Already priced");
             var skipped = Rows.Count - updated - unchanged;
@@ -779,7 +815,7 @@ internal sealed class PricingController : IDisposable
         }
         if (step == Step.Closing)
         {
-            if (workingItem is not null && row.Proposal is { CanApply: true } proposal
+            if (workingItem is not null && !row.AwaitingPriceDropDecision && row.Proposal is { CanApply: true } proposal
                 && proposal.SuggestedPrice != workingItem.CurrentPrice)
             {
                 if (workSource == PriceSource.Local && !bridge.TryCloseCompare(workingItem, out var closeError))
@@ -797,7 +833,7 @@ internal sealed class PricingController : IDisposable
             { Cancel($"Could not close the price window for {row.Item.Name}: {error}"); return; }
             if (row.Proposal is { CanApply: true } unchangedProposal && unchangedProposal.SuggestedPrice == row.Item.CurrentPrice)
                 row.Status = "Already priced";
-            index++;
+            AdvanceScanIndex(row);
             step = Step.Start;
             workingItem = null;
             ResetRequest();
@@ -812,7 +848,7 @@ internal sealed class PricingController : IDisposable
                 && current.CurrentPrice == submittedPrice)
             {
                 row.Status = "Updated";
-                index++;
+                AdvanceScanIndex(row);
                 step = Step.Start;
                 workingItem = null;
                 ResetRequest();
@@ -1105,17 +1141,25 @@ internal sealed class PricingController : IDisposable
     {
         row.Snapshot = snapshot;
         row.Proposal = Calculate(snapshot, row.Item);
-        row.Status = !row.Proposal.CanApply ? row.Proposal.Error!
-            : row.Proposal.SuggestedPrice == row.Item.CurrentPrice ? "Already priced"
-            : "Ready";
+        if (!row.Proposal.CanApply) row.Status = row.Proposal.Error!;
+        else if (row.Proposal.SuggestedPrice == row.Item.CurrentPrice) row.Status = "Already priced";
+        else if (!row.PriceDropApproved && (decimal)row.Proposal.SuggestedPrice * 2 < row.Item.CurrentPrice)
+        {
+            row.AwaitingPriceDropDecision = true;
+            row.Status = "Held for review: target is more than 50% below the current price.";
+        }
+        else row.Status = "Ready";
         step = Step.Closing;
     }
+
+    private void AdvanceScanIndex(PriceRow row)
+        => index = row.PriceDropApproved ? Rows.Count : index + 1;
 
     private void ScanFailed(PriceRow row, string error)
     {
         row.Status = error;
         if (workingItem is { DialogGeneration: > 0 }) step = Step.Closing;
-        else { index++; step = Step.Start; }
+        else { AdvanceScanIndex(row); step = Step.Start; }
     }
 
     private bool StartRequest(SellItem item, DateTimeOffset now, out string error)
