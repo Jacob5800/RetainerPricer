@@ -17,8 +17,11 @@ public sealed class UniversalisClient : IDisposable
     private enum ScopeKind { World, DataCenter, Region }
 
     private const int MaximumResponseBytes = 1_048_576;
+    private const int MaximumHistoryResponseBytes = 8 * 1_048_576;
     private const int HistoryEntryLimit = 100;
     private const int HistoryWindowSeconds = 20 * 24 * 60 * 60;
+    private const int SniperHistoryEntryLimit = 99_999;
+    private const int SniperHistoryWindowSeconds = 14 * 24 * 60 * 60;
     private const int MaximumCachedItems = 512;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
     private readonly HttpClient client;
@@ -129,6 +132,114 @@ public sealed class UniversalisClient : IDisposable
         catch (IOException ex)
         {
             throw new InvalidOperationException("The Universalis response was interrupted. Fetch prices again.", ex);
+        }
+    }
+
+    public async Task<SniperSalesSnapshot> FetchSniperSalesAsync(uint worldId, uint itemId, CancellationToken ct = default)
+    {
+        if (worldId == 0 || itemId == 0)
+            throw new ArgumentException("Select a valid item and selling world before fetching sales history.");
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(RequestTimeout);
+        try
+        {
+            var path = $"history/{worldId}/{itemId}?entriesToReturn={SniperHistoryEntryLimit}&entriesWithin={SniperHistoryWindowSeconds}";
+            var json = await RequestHistoryJsonAsync(path, deadline.Token).ConfigureAwait(false);
+            return ParseSniperSales(json, worldId, itemId, DateTimeOffset.UtcNow);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new InvalidOperationException("Universalis sales history did not respond in time.");
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new InvalidOperationException("Could not reach Universalis sales history.", ex);
+        }
+        catch (IOException ex)
+        {
+            throw new InvalidOperationException("The Universalis sales-history response was interrupted.", ex);
+        }
+    }
+
+    private async Task<byte[]> RequestHistoryJsonAsync(string path, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://universalis.app/api/v2/{path}");
+        request.Headers.UserAgent.ParseAdd("RetainerPricer/0.4");
+        request.Headers.Accept.ParseAdd("application/json");
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            throw new InvalidOperationException("Universalis has temporarily limited sales-history requests. Wait a moment, then retry.");
+        if (response.StatusCode == HttpStatusCode.NotFound)
+            throw new InvalidOperationException("Universalis has no sales history for this item and world.");
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Universalis returned HTTP {(int)response.StatusCode} for sales history.");
+        if (response.Content.Headers.ContentLength > MaximumHistoryResponseBytes)
+            throw new InvalidOperationException("Universalis returned too much sales history for this item.");
+
+        await using var source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[16_384];
+        while (true)
+        {
+            var read = await source.ReadAsync(chunk, ct).ConfigureAwait(false);
+            if (read == 0) break;
+            if (buffer.Length + read > MaximumHistoryResponseBytes)
+                throw new InvalidOperationException("Universalis returned too much sales history for this item.");
+            buffer.Write(chunk, 0, read);
+        }
+        return buffer.ToArray();
+    }
+
+    private static SniperSalesSnapshot ParseSniperSales(byte[] json, uint worldId, uint itemId, DateTimeOffset retrievedAt)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 32 });
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                throw new InvalidOperationException("Universalis returned unusable sales history.");
+            if (root.TryGetProperty("worldID", out var returnedWorld) &&
+                (!returnedWorld.TryGetUInt32(out var parsedWorld) || parsedWorld != worldId))
+                throw new InvalidOperationException("Universalis sales history belongs to another world.");
+
+            var entryRoot = root;
+            if (root.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Object)
+            {
+                if (!items.TryGetProperty(itemId.ToString(CultureInfo.InvariantCulture), out entryRoot))
+                    throw new InvalidOperationException("Universalis returned no sales history for this item.");
+            }
+            if (!entryRoot.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array)
+                throw new InvalidOperationException("Universalis returned malformed sales history.");
+
+            var minimumTimestamp = retrievedAt.AddDays(-14).ToUnixTimeSeconds();
+            var prices = new Dictionary<bool, List<uint>> { [false] = [], [true] = [] };
+            foreach (var entry in entries.EnumerateArray())
+            {
+                if (entry.ValueKind != JsonValueKind.Object ||
+                    !entry.TryGetProperty("timestamp", out var timestamp) || !timestamp.TryGetInt64(out var seconds) ||
+                    seconds < minimumTimestamp || seconds > retrievedAt.ToUnixTimeSeconds() ||
+                    !entry.TryGetProperty("pricePerUnit", out var price) || !price.TryGetUInt32(out var gil) || gil == 0 ||
+                    !entry.TryGetProperty("hq", out var hq) || hq.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    continue;
+                prices[hq.GetBoolean()].Add(gil);
+            }
+
+            var qualities = new List<SniperQualityBaseline>(2);
+            foreach (var quality in prices)
+            {
+                if (quality.Value.Count == 0) continue;
+                quality.Value.Sort();
+                var middle = quality.Value.Count / 2;
+                var median = quality.Value.Count % 2 == 0
+                    ? (uint)(((ulong)quality.Value[middle - 1] + quality.Value[middle]) / 2)
+                    : quality.Value[middle];
+                qualities.Add(new SniperQualityBaseline(quality.Key, quality.Value.Count, median));
+            }
+            return new SniperSalesSnapshot(itemId, worldId, retrievedAt, qualities.AsReadOnly());
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException("Universalis returned malformed sales history.", ex);
         }
     }
 

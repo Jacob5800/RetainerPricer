@@ -15,6 +15,7 @@ internal sealed class MainWindow : Window
     private readonly Action<Action> dispatch;
     private readonly Func<string?> retainerError;
     private readonly FeedbackClient feedback;
+    private readonly SniperMonitor sniper;
     private string lookupSearch = "";
     private string lookupSearchCache = "";
     private List<ItemChoice> lookupMatches = [];
@@ -25,6 +26,10 @@ internal sealed class MainWindow : Window
     private List<ItemChoice> exceptionMatches = [];
     private ItemChoice? exceptionSelection;
     private string? exceptionBulkAddMessage;
+    private string noRepriceSearch = "";
+    private string noRepriceSearchCache = "";
+    private List<ItemChoice> noRepriceMatches = [];
+    private ItemChoice? noRepriceSelection;
     private string batchSearch = "";
     private string batchSearchCache = "";
     private List<ItemChoice> batchMatches = [];
@@ -35,14 +40,19 @@ internal sealed class MainWindow : Window
     private string feedbackMessage = "";
     private string? feedbackStatus;
     private bool feedbackSending;
+    private string sniperSearch = "";
+    private string sniperSearchCache = "";
+    private List<ItemChoice> sniperMatches = [];
+    private ItemChoice? sniperSelection;
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
         Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
-        Func<string?> retainerError, FeedbackClient feedback) : base("Retainer Pricer")
+        Func<string?> retainerError, FeedbackClient feedback, SniperMonitor sniper) : base("Retainer Pricer")
     {
         (this.config, this.controller, this.itemChoices, this.homeWorld, this.save, this.dispatch, this.retainerError) =
             (config, controller, itemChoices, homeWorld, save, dispatch, retainerError);
         this.feedback = feedback;
+        this.sniper = sniper;
         if (config.Source != PriceSource.Universalis)
         {
             config.Source = PriceSource.Universalis;
@@ -151,9 +161,11 @@ internal sealed class MainWindow : Window
             if (ImGui.BeginTabItem("Price lookup")) { DrawManualLookup(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Existing listings")) { DrawExisting(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Exceptions")) { DrawExceptions(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("Don't reprice")) { DrawNoReprice(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Batch selling")) { DrawBatchSelling(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Settings")) { DrawSettings(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("?")) { DrawHelp(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("Sniper")) { DrawSniper(); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
         }
 
@@ -174,7 +186,10 @@ internal sealed class MainWindow : Window
         }
         ImGui.TextUnformatted($"{item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")} · {item.Quantity:N0} items");
         ImGui.TextUnformatted($"{item.Session.WorldName} · current asking price: {item.CurrentPrice:N0} gil each");
-        ImGui.BeginDisabled(controller.Busy);
+        var protectedExisting = item.IsExisting && config.NoRepriceItemIds.Contains(item.ItemId);
+        if (protectedExisting)
+            ImGui.TextDisabled("This existing listing is protected by Don't reprice. Remove it from that list before changing its price.");
+        ImGui.BeginDisabled(controller.Busy || protectedExisting);
         if (ImGui.Button("Check price again")) dispatch(() => controller.CheckCurrent());
         ImGui.EndDisabled();
         if (controller.CurrentSnapshot is { } snapshot)
@@ -187,7 +202,7 @@ internal sealed class MainWindow : Window
                     ImGui.TextUnformatted($"Lowest matching listing: {quote.LowestPrice:N0} gil each");
                     ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.6f, 1), $"Your price: {quote.SuggestedPrice:N0} gil each");
                     ImGui.TextUnformatted($"Stack before tax: {(ulong)quote.SuggestedPrice * item.Quantity:N0} gil");
-                    ImGui.BeginDisabled(controller.Busy);
+                    ImGui.BeginDisabled(controller.Busy || protectedExisting);
                     if (ImGui.Button("Apply price to selling window")) dispatch(controller.FillCurrent);
                     ImGui.EndDisabled();
                 }
@@ -198,7 +213,7 @@ internal sealed class MainWindow : Window
 
     private void DrawExisting()
     {
-        ImGui.TextWrapped("The Update existing listings button checks each eligible listing against Universalis, sets it one gil below the lowest comparable listing, then verifies the retainer accepted the change. Rows without a safe price are left untouched.");
+        ImGui.TextWrapped("The Update existing listings button checks eligible items against Universalis, undercuts comparable listings by one gil, and verifies the retainer accepted each change. Excluded and Don't reprice items are skipped.");
         if (controller.ExistingUpdateError is { } updateError) ImGui.TextWrapped(updateError);
         if (controller.ExistingApplyError is { } applyError) ImGui.TextWrapped(applyError);
         if (controller.Rows.Count == 0) return;
@@ -212,7 +227,7 @@ internal sealed class MainWindow : Window
             ImGui.TableSetupColumn("Source", ImGuiTableColumnFlags.WidthFixed, 90);
             ImGui.TableSetupColumn("Age", ImGuiTableColumnFlags.WidthFixed, 55);
             ImGui.TableSetupColumn("Result");
-            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 64);
+            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 132);
             ImGui.TableSetupScrollFreeze(0, 1);
             ImGui.TableHeadersRow();
             foreach (var row in controller.Rows)
@@ -229,6 +244,8 @@ internal sealed class MainWindow : Window
                 ImGui.TableNextColumn();
                 ImGui.BeginDisabled(controller.Busy || config.ExcludedItemIds.Contains(row.Item.ItemId));
                 if (ImGui.SmallButton("Exclude")) AddExclusion(row.Item.ItemId);
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Protect")) AddNoReprice(row.Item.ItemId);
                 ImGui.EndDisabled();
                 ImGui.PopID();
             }
@@ -303,7 +320,9 @@ internal sealed class MainWindow : Window
         ImGui.BulletText("Price lookup: search an item and retrieve its price without opening a retainer sale window. This is read-only and never changes a listing. In Captured items, Snapshot inventory or Snapshot retainer listings fills a list with Retrieve, List, and Exclude actions.");
         ImGui.BulletText("Existing listings: review the results of Update existing listings. Use Exclude beside an item to add it to your exception list.");
         ImGui.BulletText("Exceptions: items here are skipped by automatic listing and repricing. Refresh carried inventory to find items, filter by name, add a selected item, or add the current marketable inventory at once. Remove an item to allow it again.");
+        ImGui.BulletText("Don't reprice: block price changes to existing listings through Update existing listings, Auto update, or the current-item price controls. Read-only lookups still work. These items can still be listed from your carried inventory; use Exceptions to skip both listing and repricing.");
         ImGui.BulletText("Batch selling: choose items and set the maximum quantity in each listing. The optional total limit caps how much of that item is listed in one batch-only run; 0 means no total cap. Add current inventory adds marketable carried items using the current size and limit.");
+        ImGui.BulletText("Sniper: add items to a watchlist, then listen for new Universalis listings on your home world. Alerts use each quality's median unit sale price from the previous 14 days and your minimum-sales rule. Sniper only shows deals; purchases are manual.");
         ImGui.BulletText("Settings: set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, and optionally compare across your Data Center or region. Data Center and region options cannot be used together.");
 
         ImGui.Separator();
@@ -328,6 +347,147 @@ internal sealed class MainWindow : Window
         if (feedbackStatus is { Length: > 0 } status) ImGui.TextWrapped(status);
         ImGui.EndChild();
     }
+
+    private void DrawSniper()
+    {
+        ImGui.TextWrapped("Watch selected items for new Universalis listings priced below their recent sold-price median. Sniper creates deal alerts only; you choose and buy items manually in game.");
+        ImGui.TextDisabled("The live feed watches your home world. HQ and NQ have separate 14-day sale medians and sales counts.");
+
+        var isRunning = sniper.IsRunning;
+        ImGui.BeginDisabled(isRunning);
+        var threshold = (float)config.SniperThresholdFraction;
+        ImGui.SetNextItemWidth(120);
+        if (ImGui.InputFloat("Threshold × median", ref threshold, 0.01f, 0.05f, "%.3f"))
+        {
+            config.SniperThresholdFraction = Math.Clamp(threshold, 0.01f, 1.0f);
+            config.Normalize();
+            save();
+        }
+        ImGui.SameLine();
+        var minimumSales = config.SniperMinimumSales14Days;
+        ImGui.SetNextItemWidth(100);
+        if (ImGui.InputInt("Minimum sales (14d)", ref minimumSales))
+        {
+            config.SniperMinimumSales14Days = minimumSales;
+            config.Normalize();
+            save();
+        }
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("Watchlist");
+        ImGui.SetNextItemWidth(340);
+        ImGui.InputText("Search item", ref sniperSearch, 128);
+        if (!StringComparer.CurrentCultureIgnoreCase.Equals(sniperSearch, sniperSearchCache))
+            sniperSelection = null;
+        RefreshMatches(sniperSearch, ref sniperSearchCache, ref sniperMatches);
+        if (!string.IsNullOrWhiteSpace(sniperSearch) && sniperMatches.Count > 0)
+        {
+            ImGui.BeginChild("##sniperMatches", new Vector2(0, Math.Min(130, sniperMatches.Count * 22 + 8)), true);
+            foreach (var candidate in sniperMatches)
+            {
+                ImGui.PushID((int)candidate.ItemId);
+                if (ImGui.Selectable($"{candidate.Name}  ·  #{candidate.ItemId}", sniperSelection?.ItemId == candidate.ItemId))
+                {
+                    sniperSelection = candidate;
+                    sniperSearch = candidate.Name;
+                    sniperSearchCache = sniperSearch;
+                    sniperMatches = [];
+                }
+                ImGui.PopID();
+            }
+            ImGui.EndChild();
+        }
+        else if (sniperSearch.Trim().Length >= 2)
+            ImGui.TextDisabled("No item names match that search.");
+
+        var watchedIds = config.SniperWatchlistItemIds.ToHashSet();
+        ImGui.BeginDisabled(sniperSelection is null || watchedIds.Contains(sniperSelection?.ItemId ?? 0) || watchedIds.Count >= 100);
+        if (ImGui.Button("Add to watchlist") && sniperSelection is { } selected && !watchedIds.Contains(selected.ItemId))
+        {
+            config.SniperWatchlistItemIds.Add(selected.ItemId);
+            config.Normalize();
+            save();
+        }
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{watchedIds.Count}/100 items · add items you want to monitor");
+        ImGui.EndDisabled();
+
+        ImGui.Separator();
+        ImGui.TextUnformatted($"Watched items · {config.SniperWatchlistItemIds.Count}");
+        if (config.SniperWatchlistItemIds.Count == 0)
+            ImGui.TextDisabled("Add at least one item before starting the live feed.");
+        else
+        {
+            ImGui.BeginDisabled(isRunning);
+            foreach (var itemId in config.SniperWatchlistItemIds.ToArray())
+            {
+                var name = itemNamesForUi(itemId);
+                ImGui.PushID((int)itemId);
+                ImGui.TextUnformatted($"{name}  ·  #{itemId}");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Remove"))
+                {
+                    config.SniperWatchlistItemIds.Remove(itemId);
+                    config.Normalize();
+                    save();
+                }
+                ImGui.PopID();
+            }
+            ImGui.EndDisabled();
+        }
+
+        ImGui.Separator();
+        var world = homeWorld();
+        ImGui.BeginDisabled(isRunning || world is null || config.SniperWatchlistItemIds.Count == 0);
+        if (ImGui.Button("Start listening")) sniper.Start(world);
+        ImGui.EndDisabled();
+        if (sniper.IsRunning)
+        {
+            ImGui.SameLine();
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.68f, 0.12f, 0.12f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.82f, 0.18f, 0.18f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.55f, 0.08f, 0.08f, 1));
+            if (ImGui.Button("Stop listening")) sniper.Stop();
+            ImGui.PopStyleColor(3);
+        }
+        ImGui.TextWrapped(sniper.Status);
+        ImGui.TextDisabled($"Rules: listing ≤ {config.SniperThresholdFraction:P1} of the 14-day median unit sale price, with at least {config.SniperMinimumSales14Days} sales of that quality. No automated purchase is made.");
+
+        var deals = sniper.Deals;
+        ImGui.Separator();
+        ImGui.TextUnformatted($"Deals · {deals.Count}");
+        if (deals.Count == 0)
+        {
+            ImGui.TextDisabled("No qualifying new listings received yet.");
+            return;
+        }
+        if (ImGui.BeginTable("##sniperDeals", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable, new Vector2(0, Math.Max(140, ImGui.GetContentRegionAvail().Y - 25))))
+        {
+            ImGui.TableSetupColumn("Item");
+            ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 58);
+            ImGui.TableSetupColumn("Listing", ImGuiTableColumnFlags.WidthFixed, 82);
+            ImGui.TableSetupColumn("14d median", ImGuiTableColumnFlags.WidthFixed, 88);
+            ImGui.TableSetupColumn("Sales", ImGuiTableColumnFlags.WidthFixed, 52);
+            ImGui.TableSetupColumn("Seen", ImGuiTableColumnFlags.WidthFixed, 68);
+            ImGui.TableSetupScrollFreeze(0, 1);
+            ImGui.TableHeadersRow();
+            foreach (var deal in deals)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn(); ImGui.TextWrapped($"{deal.ItemName} · {deal.WorldName} · qty {deal.Quantity}");
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.IsHq ? "HQ" : "NQ");
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.PricePerUnit.ToString("N0"));
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.MedianSalePrice.ToString("N0"));
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.Sales14Days.ToString("N0"));
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.DetectedAt.ToLocalTime().ToString("HH:mm:ss"));
+            }
+            ImGui.EndTable();
+        }
+    }
+
+    private string itemNamesForUi(uint itemId) => itemChoices.FirstOrDefault(item => item.ItemId == itemId)?.Name ?? "Unknown item";
 
     private void StartFeedbackSend()
     {
@@ -507,7 +667,7 @@ internal sealed class MainWindow : Window
         ImGui.TableSetupColumn("Item");
         ImGui.TableSetupColumn("Qty", ImGuiTableColumnFlags.WidthFixed, 48);
         ImGui.TableSetupColumn("Current", ImGuiTableColumnFlags.WidthFixed, 72);
-        ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed, 150);
+        ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed, 260);
         ImGui.TableSetupScrollFreeze(0, 1);
         ImGui.TableHeadersRow();
         var world = homeWorld();
@@ -526,6 +686,15 @@ internal sealed class MainWindow : Window
             ImGui.BeginDisabled(controller.Busy);
             if (ImGui.SmallButton("Exclude")) AddExclusion(item.ItemId);
             ImGui.EndDisabled();
+            ImGui.SameLine();
+            if (config.NoRepriceItemIds.Contains(item.ItemId))
+                ImGui.TextDisabled("Protected");
+            else
+            {
+                ImGui.BeginDisabled(controller.Busy || config.ExcludedItemIds.Contains(item.ItemId));
+                if (ImGui.SmallButton("Don't reprice")) AddNoReprice(item.ItemId);
+                ImGui.EndDisabled();
+            }
             ImGui.PopID();
         }
         ImGui.EndTable();
@@ -661,6 +830,83 @@ internal sealed class MainWindow : Window
         exceptionBulkAddMessage = itemIds.Count == 0
             ? "No marketable inventory items to add; untradeable and nonmarketable items are skipped automatically."
             : $"Added {newItemIds.Count} inventory item(s); {itemIds.Count - newItemIds.Count} were already excluded.";
+    }
+
+    private void DrawNoReprice()
+    {
+        ImGui.TextUnformatted("Never reprice these items");
+        ImGui.TextWrapped("Items on this list are still eligible for new listings. Their existing listings cannot be repriced by Update existing listings, Auto update, or the current-item price controls. Read-only price lookups still work. Use Exceptions if an item should also be skipped when creating new listings.");
+
+        ImGui.SetNextItemWidth(360);
+        ImGui.InputText("Search item names", ref noRepriceSearch, 128);
+        if (!StringComparer.CurrentCultureIgnoreCase.Equals(noRepriceSearch, noRepriceSearchCache))
+            noRepriceSelection = null;
+        RefreshMatches(noRepriceSearch, ref noRepriceSearchCache, ref noRepriceMatches);
+
+        var pickerItems = noRepriceMatches.Where(item => !config.NoRepriceItemIds.Contains(item.ItemId)).ToArray();
+        var preview = noRepriceSelection is { } selected
+            ? $"{selected.Name}  ·  #{selected.ItemId}"
+            : "Select an item to protect...";
+        ImGui.SetNextItemWidth(420);
+        if (ImGui.BeginCombo("Item to protect", preview))
+        {
+            if (pickerItems.Length == 0)
+                ImGui.TextDisabled(noRepriceSearch.Trim().Length < 2
+                    ? "Enter at least two characters to search the item list."
+                    : "No unprotected items match that search.");
+            foreach (var candidate in pickerItems)
+            {
+                var label = $"{candidate.Name}  ·  #{candidate.ItemId}";
+                if (ImGui.Selectable(label, noRepriceSelection?.ItemId == candidate.ItemId))
+                    noRepriceSelection = candidate;
+            }
+            ImGui.EndCombo();
+        }
+
+        var canAdd = noRepriceSelection is { } choice && !config.NoRepriceItemIds.Contains(choice.ItemId);
+        ImGui.BeginDisabled(controller.Busy || !canAdd);
+        if (ImGui.Button("Add to Don't reprice") && noRepriceSelection is { } addChoice)
+        {
+            AddNoReprice(addChoice.ItemId);
+            noRepriceSelection = null;
+        }
+        ImGui.EndDisabled();
+
+        ImGui.Separator();
+        ImGui.TextUnformatted($"Protected items · {config.NoRepriceItemIds.Count}");
+        if (config.NoRepriceItemIds.Count == 0)
+        {
+            ImGui.TextDisabled("No items are protected from repricing.");
+            return;
+        }
+
+        if (ImGui.BeginChild("##noRepriceList", new Vector2(0, 260), true))
+        {
+            foreach (var itemId in config.NoRepriceItemIds.ToArray())
+            {
+                var name = itemChoices.FirstOrDefault(item => item.ItemId == itemId)?.Name ?? $"Item {itemId}";
+                ImGui.PushID((int)itemId);
+                ImGui.TextUnformatted($"{name}  ·  #{itemId}");
+                ImGui.SameLine();
+                ImGui.BeginDisabled(controller.Busy);
+                if (ImGui.SmallButton("Remove"))
+                {
+                    config.NoRepriceItemIds.Remove(itemId);
+                    config.Normalize();
+                    save();
+                }
+                ImGui.EndDisabled();
+                ImGui.PopID();
+            }
+        }
+        ImGui.EndChild();
+    }
+
+    private void AddNoReprice(uint itemId)
+    {
+        if (!config.NoRepriceItemIds.Contains(itemId)) config.NoRepriceItemIds.Add(itemId);
+        config.Normalize();
+        save();
     }
 
     private void DrawBatchSelling()

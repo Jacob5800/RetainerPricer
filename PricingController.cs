@@ -316,6 +316,8 @@ internal sealed class PricingController : IDisposable
         if (!marketableItemIds.Contains(target.ItemId))
         { Status = "This item is not marketable and will be skipped."; return; }
         if (IsExcluded(target.ItemId)) { Status = $"{target.Name} is in the item exception list and will be skipped."; return; }
+        if (target.IsExisting && IsNoReprice(target.ItemId))
+        { CurrentSnapshot = null; CurrentProposal = null; Status = $"{target.Name} is protected by Don't reprice. The plugin will not change its existing price."; return; }
         if (fillAutomatically)
         {
             if (!bridge.TryGetOwnRetainerIds(out _))
@@ -341,6 +343,8 @@ internal sealed class PricingController : IDisposable
     public void FillCurrent()
     {
         if (Busy || workingItem is null || CurrentSnapshot is null) return;
+        if (workingItem.IsExisting && IsNoReprice(workingItem.ItemId))
+        { Status = $"{workingItem.Name} is protected by Don't reprice. The plugin will not change its existing price."; return; }
         CurrentProposal = Calculate(CurrentSnapshot, workingItem);
         if (!CurrentProposal.CanApply) { Status = CurrentProposal.Error!; return; }
         Status = bridge.TryFillPrice(workingItem, CurrentProposal.SuggestedPrice, out var error)
@@ -357,12 +361,12 @@ internal sealed class PricingController : IDisposable
         if (!bridge.TryGetSession(out var active, out var error)) { Status = error; return; }
         if (!bridge.TryGetOwnRetainerIds(out _))
         { Status = "Retainer ownership data is not ready. Reopen the retainer selling list and try again; no listing will be repriced until your own stock can be excluded."; return; }
-        if (!TryBeginExistingListingScan(active, out var total, out var excluded, out var unmarketable, out error))
+        if (!TryBeginExistingListingScan(active, out var total, out var excluded, out var protectedCount, out var unmarketable, out error))
         { Status = error; return; }
         if (total == 0) { Status = "This retainer has no listings."; return; }
-        if (Rows.Count == 0) { Status = "All current listings are excluded or are not marketable."; return; }
+        if (Rows.Count == 0) { Status = "All current listings are excluded, protected from repricing, or not marketable."; return; }
         work = Work.Scan;
-        Status = $"Automatically checking and updating {Rows.Count} eligible listing(s) with Universalis ({excluded} excluded, {unmarketable} not marketable). Items without a competing listing or a sale in the last 20 days will be left unchanged.";
+        Status = $"Automatically checking and updating {Rows.Count} eligible listing(s) with Universalis ({excluded} excluded, {protectedCount} protected from repricing, {unmarketable} not marketable). Items without a competing listing or a sale in the last 20 days will be left unchanged.";
     }
 
     public void AutoUpdateAllRetainers()
@@ -427,12 +431,12 @@ internal sealed class PricingController : IDisposable
     }
 
     private bool TryBeginExistingListingScan(MarketSession active, out int total, out int excluded,
-        out int unmarketable, out string error)
+        out int protectedCount, out int unmarketable, out string error)
     {
         Rows.Clear();
         index = 0;
         workingItem = null;
-        total = excluded = unmarketable = 0;
+        total = excluded = protectedCount = unmarketable = 0;
         var listings = bridge.ReadExistingListings(out error);
         if (error.Length != 0) return false;
         if (listings.Any(item => item.Session.RetainerId != active.RetainerId || item.Session.ContentId != active.ContentId))
@@ -440,8 +444,9 @@ internal sealed class PricingController : IDisposable
 
         total = listings.Count;
         excluded = listings.Count(item => IsExcluded(item.ItemId));
-        unmarketable = listings.Count(item => !marketableItemIds.Contains(item.ItemId));
-        Rows.AddRange(listings.Where(item => marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId))
+        protectedCount = listings.Count(item => !IsExcluded(item.ItemId) && IsNoReprice(item.ItemId));
+        unmarketable = listings.Count(item => !IsExcluded(item.ItemId) && !IsNoReprice(item.ItemId) && !marketableItemIds.Contains(item.ItemId));
+        Rows.AddRange(listings.Where(item => marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId) && !IsNoReprice(item.ItemId))
             .Select(item => new PriceRow(item)));
         session = active;
         step = Step.Start;
@@ -472,10 +477,10 @@ internal sealed class PricingController : IDisposable
                         "Auto update stopped because the open selling list did not match the queued retainer. No other retainer was changed.");
                     return;
                 }
-                if (!TryBeginExistingListingScan(active, out var total, out var excluded, out var unmarketable, out error))
+                if (!TryBeginExistingListingScan(active, out var total, out var excluded, out var protectedCount, out var unmarketable, out error))
                 { Cancel($"Auto update stopped while reading {target.Name}'s listings: {error}"); return; }
-                autoSkipped += excluded + unmarketable;
-                Status = $"Auto update · {target.Name}: {Rows.Count} eligible listing(s), {excluded} excluded, {unmarketable} not marketable.";
+                autoSkipped += excluded + protectedCount + unmarketable;
+                Status = $"Auto update · {target.Name}: {Rows.Count} eligible listing(s), {excluded} excluded, {protectedCount} protected from repricing, {unmarketable} not marketable.";
                 if (total == 0 || Rows.Count == 0)
                 {
                     autoRetainersCompleted++;
@@ -1168,6 +1173,8 @@ internal sealed class PricingController : IDisposable
             dataCenterName);
 
     private bool IsExcluded(uint itemId) => config.ExcludedItemIds.Contains(itemId);
+
+    private bool IsNoReprice(uint itemId) => config.NoRepriceItemIds.Contains(itemId);
 
     private void ResetRequest()
     {

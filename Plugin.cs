@@ -19,6 +19,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly UniversalisClient universalis = new();
     private readonly FeedbackClient feedback = new();
     private readonly PricingController controller;
+    private readonly SniperMonitor sniper;
     private readonly MainWindow window;
     private bool wasOpen;
     private bool disposed;
@@ -43,8 +44,9 @@ public sealed class Plugin : IDalamudPlugin
             .Select(item => item.RowId)
             .ToHashSet();
         controller = new PricingController(bridge, universalis, config, marketableItemIds);
+        sniper = new SniperMonitor(universalis, config, itemChoices);
         window = new MainWindow(config, controller, itemChoices, bridge.GetHomeWorld, Save, Dispatch,
-            () => bridge.RetainerAvailabilityError, feedback);
+            () => bridge.RetainerAvailabilityError, feedback, sniper);
         windows.AddWindow(window);
         if (bridge.LocalAvailabilityError is { } localCompatibilityError)
             log.Warning("Retainer Pricer local pricing: {Error}", localCompatibilityError);
@@ -99,6 +101,7 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.OpenConfigUi -= Toggle;
         commands.RemoveHandler("/retainerpricer");
         controller.Dispose();
+        sniper.Dispose();
         bridge.Dispose();
         universalis.Dispose();
         feedback.Dispose();
