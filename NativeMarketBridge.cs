@@ -1,6 +1,7 @@
 using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.ClientState.Conditions;
+using Dalamud.Memory;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -15,6 +16,8 @@ namespace RetainerPricer;
 
 public sealed record MarketSession(ulong ContentId, ulong RetainerId, uint WorldId, string WorldName,
     string? DataCenterName = null);
+
+public sealed record RetainerIdentity(ulong RetainerId, string Name);
 
 public sealed record SellItem(MarketSession Session, uint ItemId, string Name, bool IsHq,
     uint Quantity, uint CurrentPrice, int InventoryType, int Slot, long DialogGeneration = 0)
@@ -67,6 +70,9 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     public bool IsClientStateUnavailable => !clientState.IsLoggedIn || !player.IsLoaded || player.ContentId == 0 ||
         condition[ConditionFlag.BetweenAreas] || condition[ConditionFlag.BetweenAreas51] ||
         condition[ConditionFlag.LoggingOut] || condition[ConditionFlag.SystemError];
+    public bool IsRetainerPickerVisible => IsAddonVisible("RetainerList");
+    public bool IsRetainerMenuVisible => IsAddonVisible("SelectString");
+    public bool IsRetainerSellListVisible => IsAddonVisible("RetainerSellList");
     public bool IsLocalSearchBusy
     {
         get
@@ -180,6 +186,19 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         if (RetainerAgentView.For(agent) is null || !agent->IsAgentActive()) return false;
         var active = manager->GetActiveRetainer();
         return active != null && active->RetainerId != expected.RetainerId;
+    }
+
+    public bool IsCharacterOrWorldChanged(ulong expectedContentId, uint expectedWorldId) =>
+        !player.IsLoaded || player.ContentId == 0 || player.ContentId != expectedContentId ||
+        player.CurrentWorld.RowId != expectedWorldId || player.HomeWorld.RowId != expectedWorldId;
+
+    public bool TryGetSelectedRetainerId(out ulong retainerId)
+    {
+        retainerId = 0;
+        var manager = RetainerManager.Instance();
+        if (manager == null || !manager->IsReady || manager->LastSelectedRetainerId == 0) return false;
+        retainerId = manager->LastSelectedRetainerId;
+        return true;
     }
 
     private string? GetHomeDataCenterName()
@@ -349,6 +368,124 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         return true;
     }
 
+    public bool TryGetOwnRetainers(out IReadOnlyList<RetainerIdentity> retainers)
+    {
+        var result = new List<RetainerIdentity>();
+        retainers = result;
+        if (!player.IsLoaded || player.ContentId == 0) return false;
+        var manager = RetainerManager.Instance();
+        if (manager == null || !manager->IsReady) return false;
+        var count = manager->GetRetainerCount();
+        if (count is 0 or > 10) return false;
+        var ids = new HashSet<ulong>();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        for (uint index = 0; index < count; index++)
+        {
+            var retainer = manager->GetRetainerBySortedIndex(index);
+            if (retainer == null || retainer->RetainerId == 0) return false;
+            var name = retainer->NameString;
+            if (string.IsNullOrWhiteSpace(name) || !ids.Add(retainer->RetainerId) || !names.Add(name)) return false;
+            result.Add(new RetainerIdentity(retainer->RetainerId, name));
+        }
+        retainers = result;
+        return true;
+    }
+
+    public bool TryCloseRetainerSellList(MarketSession expected, out string error)
+    {
+        if (IsSessionIdentityChanged(expected))
+        { error = "The active retainer changed before the sale list could be closed."; return false; }
+        if (GetSellAddon() != null || IsComparisonVisible)
+        { error = "Close the item price and comparison windows before moving to another retainer."; return false; }
+        var list = (AtkUnitBase*)gameGui.GetAddonByName("RetainerSellList").Address;
+        if (list == null || !list->IsReady || !list->IsVisible)
+        { error = "The current retainer's selling list is no longer open."; return false; }
+        if (!list->Close(true))
+        { error = "The game did not close the current retainer's selling list."; return false; }
+        error = string.Empty;
+        return true;
+    }
+
+    public bool TrySelectRetainerById(RetainerIdentity expected, out bool unavailable, out string error)
+    {
+        unavailable = false;
+        var picker = (AtkUnitBase*)gameGui.GetAddonByName("RetainerList").Address;
+        if (picker == null || !picker->IsReady || !picker->IsVisible)
+        { error = "The retainer picker is not ready."; return false; }
+        if (!TryGetOwnRetainers(out var retainers))
+        { error = "The retainer ownership list could not be read safely."; return false; }
+        if (!retainers.Any(retainer => retainer.RetainerId == expected.RetainerId && retainer.Name == expected.Name))
+        { error = "The queued retainer no longer matches this character's retainer list."; return false; }
+
+        var rowIndex = -1;
+        for (var index = 0; index < retainers.Count; index++)
+        {
+            var valueIndex = 3 + index * 10;
+            if (picker->AtkValues == null || valueIndex + 8 >= picker->AtkValuesCount)
+            { error = "The retainer picker's visible rows could not be verified."; return false; }
+            ref var nameValue = ref picker->AtkValues[valueIndex];
+            if (nameValue.Type is not (AtkValueType.String or AtkValueType.ManagedString or AtkValueType.ConstString) ||
+                nameValue.String.Value == null)
+            { error = "The retainer picker's row names are unavailable."; return false; }
+            var name = MemoryHelper.ReadSeStringNullTerminated((nint)nameValue.String.Value).TextValue;
+            if (name == expected.Name)
+            {
+                if (rowIndex != -1)
+                { error = "More than one retainer has the same displayed name; selection was stopped safely."; return false; }
+                rowIndex = index;
+                ref var activeValue = ref picker->AtkValues[valueIndex + 8];
+                if (activeValue.Type != AtkValueType.Bool)
+                { error = "The game's retainer availability flag could not be verified."; return false; }
+                if (!activeValue.Bool)
+                {
+                    unavailable = true;
+                    error = string.Empty;
+                    return false;
+                }
+            }
+        }
+        if (rowIndex < 0)
+        { error = "The queued retainer was not found in the visible picker."; return false; }
+
+        var callback = stackalloc AtkValue[4];
+        callback[0] = new AtkValue { Type = AtkValueType.Int, Int = 2 };
+        callback[1] = new AtkValue { Type = AtkValueType.UInt, UInt = (uint)rowIndex };
+        callback[2] = default;
+        callback[3] = default;
+        picker->FireCallback(4, callback, true);
+        error = string.Empty;
+        return true;
+    }
+
+    public bool TrySelectRetainerMenuEntry(Func<string, bool> match, out string selectedText, out string error)
+    {
+        selectedText = string.Empty;
+        var menu = (AddonSelectString*)gameGui.GetAddonByName("SelectString").Address;
+        if (menu == null || !menu->IsReady || !menu->IsVisible)
+        { error = "The retainer option menu is not open."; return false; }
+        var popup = menu->PopupMenu.PopupMenu;
+        if (popup.EntryNames == null || popup.EntryCount is <= 0 or > 64)
+        { error = "The retainer option menu entries could not be read safely."; return false; }
+        var matchIndex = -1;
+        for (var index = 0; index < popup.EntryCount; index++)
+        {
+            var name = popup.EntryNames[index].Value;
+            if (name == null) continue;
+            var text = MemoryHelper.ReadSeStringNullTerminated((nint)name).TextValue;
+            if (!match(text)) continue;
+            if (matchIndex >= 0)
+            { error = "The retainer option menu contains multiple matching entries; no choice was made."; return false; }
+            matchIndex = index;
+            selectedText = text;
+        }
+        if (matchIndex < 0)
+        { error = "The expected retainer option was not found in the menu."; return false; }
+        var callback = stackalloc AtkValue[1];
+        callback[0] = new AtkValue { Type = AtkValueType.Int, Int = matchIndex };
+        menu->FireCallback(1, callback, true);
+        error = string.Empty;
+        return true;
+    }
     public bool TryFillPrice(SellItem expected, uint price, out string error)
     {
         if (price is 0 or > MaximumPrice)

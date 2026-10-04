@@ -17,8 +17,13 @@ internal sealed class PricingController : IDisposable
             : band < 85 ? Random.Shared.Next(365, 400)
             : Random.Shared.Next(651, 851);
     }
-    private enum Work { Idle, Single, Manual, Scan, BatchListing }
-    private enum Step { Start, Opening, WaitingToCompare, Quote, Closing, ClosingListingCompare, ClosingSkippedCompare, ClosingSkippedSell, Confirming }
+    private enum Work { Idle, Single, Manual, Scan, AutoUpdateAllRetainers, BatchListing }
+    private enum Step
+    {
+        Start, Opening, WaitingToCompare, Quote, Closing, ClosingListingCompare, ClosingSkippedCompare,
+        ClosingSkippedSell, Confirming, AutoStartRetainer, AutoCloseSellList, AutoWaitRetainerMenu,
+        AutoWaitPicker, AutoSelectRetainer, AutoWaitTargetMenu, AutoSelectSellMenu, AutoWaitSellList
+    }
     private readonly NativeMarketBridge bridge;
     private readonly UniversalisClient universalis;
     private readonly PluginConfig config;
@@ -50,6 +55,17 @@ internal sealed class PricingController : IDisposable
     private bool batchSellingOnly;
     private readonly Dictionary<uint, uint> batchSoldQuantitiesByItemId = [];
     private readonly HashSet<uint> batchMaximumReachedItemIds = [];
+    private readonly List<RetainerIdentity> autoRetainers = [];
+    private int autoRetainerIndex;
+    private int autoRetainersCompleted;
+    private int autoUnavailableRetainers;
+    private int autoEmptyRetainers;
+    private int autoUpdated;
+    private int autoAlreadyPriced;
+    private int autoSkipped;
+    private ulong autoContentId;
+    private uint autoWorldId;
+    private ulong autoLastSelectedRetainerId;
 
     private sealed record ManualQuoteTarget(ItemChoice Item, bool IsHq, MarketWorld World);
 
@@ -82,7 +98,8 @@ internal sealed class PricingController : IDisposable
     public bool Busy => work != Work.Idle;
     public bool IsListingItemsRunning => work == Work.BatchListing;
     public bool IsBatchSellingOnlyRunning => work == Work.BatchListing && batchSellingOnly;
-    public bool IsUpdatingListings => work == Work.Scan;
+    public bool IsUpdatingListings => work is Work.Scan or Work.AutoUpdateAllRetainers;
+    public bool IsAutoUpdatingAllRetainers => work == Work.AutoUpdateAllRetainers;
     public bool CanUpdateExisting => bridge.RetainerAvailabilityError is null;
     public bool CanApplyExisting => CanUpdateExisting && bridge.ItemSelectorAvailabilityError is null;
     public bool CanStartListingItems => CanApplyExisting;
@@ -91,9 +108,25 @@ internal sealed class PricingController : IDisposable
     public string? StartListingAvailabilityError => ExistingUpdateError ?? ExistingApplyError;
     public bool HasRetainer => bridge.TryGetSession(out _, out _);
     public string Status { get; private set; } = "Open a retainer's selling list to begin.";
-    public string Progress => work is Work.Scan ? $"Checking {Math.Min(index + 1, Rows.Count)} of {Rows.Count}"
-        : work is Work.BatchListing ? $"Listing {Math.Min(index + 1, batchCandidates.Count)} of {batchCandidates.Count}"
-        : "";
+    public string Progress
+    {
+        get
+        {
+            if (work == Work.Scan) return $"Checking {Math.Min(index + 1, Rows.Count)} of {Rows.Count}";
+            if (work == Work.AutoUpdateAllRetainers)
+            {
+                var retainerName = autoRetainers.Count > autoRetainerIndex
+                    ? autoRetainers[autoRetainerIndex].Name : "Retainers";
+                return step is Step.AutoStartRetainer or Step.AutoCloseSellList or Step.AutoWaitRetainerMenu or
+                    Step.AutoWaitPicker or Step.AutoSelectRetainer or Step.AutoWaitTargetMenu or
+                    Step.AutoSelectSellMenu or Step.AutoWaitSellList
+                    ? $"Retainer {Math.Min(autoRetainerIndex + 1, autoRetainers.Count)} of {autoRetainers.Count}: {retainerName}"
+                    : $"Retainer {Math.Min(autoRetainerIndex + 1, autoRetainers.Count)} of {autoRetainers.Count}: {retainerName} · listing {Math.Min(index + 1, Rows.Count)} of {Rows.Count}";
+            }
+            if (work == Work.BatchListing) return $"Listing {Math.Min(index + 1, batchCandidates.Count)} of {batchCandidates.Count}";
+            return "";
+        }
+    }
 
     public void Update()
     {
@@ -105,7 +138,15 @@ internal sealed class PricingController : IDisposable
                 Cancel("Stopped because the character disconnected, began loading, or started logging out.");
                 return;
             }
-            if (work != Work.Manual && session is not null && bridge.IsSessionIdentityChanged(session))
+            if (work == Work.AutoUpdateAllRetainers && bridge.IsCharacterOrWorldChanged(autoContentId, autoWorldId))
+            {
+                Cancel("Stopped because the character or home world changed while moving between retainers.");
+                return;
+            }
+            var autoNavigation = work == Work.AutoUpdateAllRetainers && step is Step.AutoCloseSellList or
+                Step.AutoWaitRetainerMenu or Step.AutoWaitPicker or Step.AutoSelectRetainer or
+                Step.AutoWaitTargetMenu or Step.AutoSelectSellMenu or Step.AutoWaitSellList;
+            if (work != Work.Manual && !autoNavigation && session is not null && bridge.IsSessionIdentityChanged(session))
             {
                 Cancel("Stopped because the character, world, or active retainer changed.");
                 return;
@@ -138,6 +179,7 @@ internal sealed class PricingController : IDisposable
         }
         if (work == Work.Single) TickSingle(now);
         else if (work == Work.Scan) TickScan(now);
+        else if (work == Work.AutoUpdateAllRetainers) TickAutoUpdateAllRetainers(now);
         else if (work == Work.BatchListing) TickBatchListing(now);
     }
 
@@ -322,19 +364,218 @@ internal sealed class PricingController : IDisposable
         if (!bridge.TryGetSession(out var active, out var error)) { Status = error; return; }
         if (!bridge.TryGetOwnRetainerIds(out _))
         { Status = "Retainer ownership data is not ready. Reopen the retainer selling list and try again; no listing will be repriced until your own stock can be excluded."; return; }
-        var items = bridge.ReadExistingListings(out error);
-        if (items.Count == 0) { Status = string.IsNullOrEmpty(error) ? "This retainer has no listings." : error; return; }
-        var unmarketable = items.Count(item => !marketableItemIds.Contains(item.ItemId));
-        var excluded = items.Count(item => IsExcluded(item.ItemId));
-        items = items.Where(item => marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId)).ToList();
-        if (items.Count == 0) { Status = "All current listings are excluded or are not marketable."; return; }
-        Rows.AddRange(items.Select(x => new PriceRow(x)));
-        session = active;
+        if (!TryBeginExistingListingScan(active, out var total, out var excluded, out var unmarketable, out error))
+        { Status = error; return; }
+        if (total == 0) { Status = "This retainer has no listings."; return; }
+        if (Rows.Count == 0) { Status = "All current listings are excluded or are not marketable."; return; }
         work = Work.Scan;
+        Status = $"Automatically checking and updating {Rows.Count} eligible listing(s) with Universalis ({excluded} excluded, {unmarketable} not marketable). Items without a competing listing or a sale in the last 20 days will be left unchanged.";
+    }
+
+    public void AutoUpdateAllRetainers()
+    {
+        if (Busy) return;
+        if (!CanStartListingItems) { Status = StartListingAvailabilityError!; return; }
+        if (bridge.TryReadSellItem(out _, out _))
+        { Status = "Close the individual selling window first, leaving the retainer's selling list open."; return; }
+        if (bridge.IsSellWindowVisible || bridge.IsComparisonVisible || !bridge.IsRetainerSellListVisible)
+        { Status = "Close the item or market comparison window and leave the retainer's selling list open before starting Auto update."; return; }
+        if (!bridge.TryGetSession(out var active, out var error)) { Status = error; return; }
+        if (!bridge.TryGetOwnRetainers(out var retainers) || !bridge.TryGetOwnRetainerIds(out _))
+        { Status = "Retainer ownership data is not ready. Reopen the retainer selling list and try again; no prices will be changed until every retainer can be identified."; return; }
+
+        var activeIndex = -1;
+        for (var i = 0; i < retainers.Count; i++)
+            if (retainers[i].RetainerId == active.RetainerId) { activeIndex = i; break; }
+        if (activeIndex < 0)
+        { Status = "The open retainer could not be matched to your retainer roster."; return; }
+
+        autoRetainers.Clear();
+        autoRetainers.Add(retainers[activeIndex]);
+        autoRetainers.AddRange(retainers.Where((_, i) => i != activeIndex));
+        autoRetainerIndex = 0;
+        autoRetainersCompleted = autoUnavailableRetainers = autoEmptyRetainers = 0;
+        autoUpdated = autoAlreadyPriced = autoSkipped = 0;
+        autoContentId = active.ContentId;
+        autoWorldId = active.WorldId;
+        autoLastSelectedRetainerId = active.RetainerId;
+        session = active;
+        workSource = PriceSource.Universalis;
+        work = Work.AutoUpdateAllRetainers;
+        step = Step.AutoStartRetainer;
+        nextTick = DateTimeOffset.UtcNow;
+        Status = $"Auto update queued for {autoRetainers.Count} retainer(s), starting with {retainers[activeIndex].Name}.";
+    }
+
+    private bool TryBeginExistingListingScan(MarketSession active, out int total, out int excluded,
+        out int unmarketable, out string error)
+    {
+        Rows.Clear();
         index = 0;
+        workingItem = null;
+        total = excluded = unmarketable = 0;
+        var listings = bridge.ReadExistingListings(out error);
+        if (error.Length != 0) return false;
+        if (listings.Any(item => item.Session.RetainerId != active.RetainerId || item.Session.ContentId != active.ContentId))
+        { error = "The retainer changed while its listings were being read."; return false; }
+
+        total = listings.Count;
+        excluded = listings.Count(item => IsExcluded(item.ItemId));
+        unmarketable = listings.Count(item => !marketableItemIds.Contains(item.ItemId));
+        Rows.AddRange(listings.Where(item => marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId))
+            .Select(item => new PriceRow(item)));
+        session = active;
         step = Step.Start;
         workSource = PriceSource.Universalis;
-        Status = $"Automatically checking and updating {items.Count} eligible listing(s) with Universalis ({excluded} excluded, {unmarketable} not marketable). Items without a competing listing or a sale in the last 20 days will be left unchanged.";
+        error = string.Empty;
+        return true;
+    }
+
+    private void TickAutoUpdateAllRetainers(DateTimeOffset now)
+    {
+        var error = string.Empty;
+        if (step is Step.Start or Step.Opening or Step.WaitingToCompare or Step.Quote or Step.Closing or
+            Step.ClosingListingCompare or Step.ClosingSkippedCompare or Step.ClosingSkippedSell or Step.Confirming)
+        {
+            TickScan(now);
+            return;
+        }
+
+        switch (step)
+        {
+            case Step.AutoStartRetainer:
+            {
+                if (autoRetainerIndex >= autoRetainers.Count) { FinishAutoUpdate(); return; }
+                var target = autoRetainers[autoRetainerIndex];
+                if (!bridge.TryGetSession(out var active, out error) || active.RetainerId != target.RetainerId || active.ContentId != autoContentId)
+                {
+                    Cancel(error.Length != 0 ? $"Auto update stopped: {error}" :
+                        "Auto update stopped because the open selling list did not match the queued retainer. No other retainer was changed.");
+                    return;
+                }
+                if (!TryBeginExistingListingScan(active, out var total, out var excluded, out var unmarketable, out error))
+                { Cancel($"Auto update stopped while reading {target.Name}'s listings: {error}"); return; }
+                autoSkipped += excluded + unmarketable;
+                Status = $"Auto update · {target.Name}: {Rows.Count} eligible listing(s), {excluded} excluded, {unmarketable} not marketable.";
+                if (total == 0 || Rows.Count == 0)
+                {
+                    autoRetainersCompleted++;
+                    autoEmptyRetainers++;
+                    step = Step.AutoCloseSellList;
+                    deadline = now.AddSeconds(10);
+                    return;
+                }
+                return;
+            }
+            case Step.AutoCloseSellList:
+                if (session is null || session.RetainerId != autoRetainers[autoRetainerIndex].RetainerId ||
+                    !bridge.TryCloseRetainerSellList(session, out error))
+                { Cancel($"Auto update stopped before leaving {autoRetainers[autoRetainerIndex].Name}'s selling list: {error}"); return; }
+                step = Step.AutoWaitRetainerMenu;
+                deadline = now.AddSeconds(10);
+                Status = $"Auto update · returning from {autoRetainers[autoRetainerIndex].Name}'s selling list...";
+                return;
+            case Step.AutoWaitRetainerMenu:
+                if (bridge.IsRetainerMenuVisible)
+                {
+                    if (!bridge.TryGetSelectedRetainerId(out var menuRetainerId) || menuRetainerId != autoRetainers[autoRetainerIndex].RetainerId)
+                    { Cancel("Auto update stopped because the retainer menu did not belong to the retainer just processed."); return; }
+                    if (!bridge.TrySelectRetainerMenuEntry(text => text.Trim().Equals("Quit", StringComparison.OrdinalIgnoreCase), out _, out error))
+                    { Cancel($"Auto update stopped at the retainer menu: {error}"); return; }
+                    session = null;
+                    step = Step.AutoWaitPicker;
+                    deadline = now.AddSeconds(10);
+                    nextTick = now.AddMilliseconds(350);
+                    return;
+                }
+                if (now > deadline) Cancel("Auto update stopped because the retainer option menu did not appear after closing the sale list.");
+                return;
+            case Step.AutoWaitPicker:
+                if (bridge.IsRetainerPickerVisible)
+                {
+                    autoRetainerIndex++;
+                    if (autoRetainerIndex >= autoRetainers.Count) { FinishAutoUpdate(); return; }
+                    step = Step.AutoSelectRetainer;
+                    return;
+                }
+                if (now > deadline) Cancel("Auto update stopped because the retainer picker did not appear after choosing Quit.");
+                return;
+            case Step.AutoSelectRetainer:
+            {
+                var target = autoRetainers[autoRetainerIndex];
+                if (!bridge.TrySelectRetainerById(target, out var unavailable, out error))
+                {
+                    if (!unavailable) { Cancel($"Auto update stopped before selecting {target.Name}: {error}"); return; }
+                    autoUnavailableRetainers++;
+                    autoRetainersCompleted++;
+                    autoRetainerIndex++;
+                    Status = $"Auto update · skipped {target.Name}: retainer is not currently available.";
+                    nextTick = now.AddMilliseconds(300);
+                    if (autoRetainerIndex >= autoRetainers.Count) FinishAutoUpdate();
+                    return;
+                }
+                step = Step.AutoWaitTargetMenu;
+                deadline = now.AddSeconds(10);
+                Status = $"Auto update · opening {target.Name}...";
+                return;
+            }
+            case Step.AutoWaitTargetMenu:
+            {
+                var expected = autoRetainers[autoRetainerIndex];
+                if (bridge.TryGetSelectedRetainerId(out var selectedId) && selectedId != expected.RetainerId &&
+                    selectedId != autoLastSelectedRetainerId)
+                { Cancel("Auto update stopped because the game selected a different retainer than the queued one."); return; }
+                if (selectedId == expected.RetainerId && bridge.IsRetainerMenuVisible)
+                {
+                    autoLastSelectedRetainerId = expected.RetainerId;
+                    step = Step.AutoSelectSellMenu;
+                    return;
+                }
+                if (now > deadline) Cancel($"Auto update stopped because {expected.Name}'s retainer menu did not appear.");
+                return;
+            }
+            case Step.AutoSelectSellMenu:
+            {
+                var expected = autoRetainers[autoRetainerIndex];
+                if (!bridge.TryGetSelectedRetainerId(out var selectedId) || selectedId != expected.RetainerId)
+                { Cancel("Auto update stopped because the retainer changed before opening its listing menu."); return; }
+                if (!bridge.TrySelectRetainerMenuEntry(text =>
+                        text.Contains("sell", StringComparison.OrdinalIgnoreCase) &&
+                        text.Contains("retainer", StringComparison.OrdinalIgnoreCase) &&
+                        text.Contains("market", StringComparison.OrdinalIgnoreCase), out _, out error))
+                { Cancel($"Auto update stopped at {expected.Name}'s option menu: {error}"); return; }
+                step = Step.AutoWaitSellList;
+                deadline = now.AddSeconds(12);
+                nextTick = now.AddMilliseconds(350);
+                return;
+            }
+            case Step.AutoWaitSellList:
+            {
+                var expected = autoRetainers[autoRetainerIndex];
+                if (bridge.TryGetSession(out var opened, out _) && opened.RetainerId == expected.RetainerId && opened.ContentId == autoContentId)
+                {
+                    if (opened.WorldId != autoWorldId)
+                    { Cancel("Auto update stopped because the active world changed while opening the next retainer."); return; }
+                    session = opened;
+                    step = Step.AutoStartRetainer;
+                    nextTick = now.AddMilliseconds(350);
+                    return;
+                }
+                if (bridge.TryGetSelectedRetainerId(out var selected) && selected != expected.RetainerId && selected != autoLastSelectedRetainerId)
+                { Cancel("Auto update stopped because the opened sale list belongs to an unexpected retainer."); return; }
+                if (now > deadline) Cancel($"Auto update stopped because {expected.Name}'s selling list did not open.");
+                return;
+            }
+        }
+    }
+
+    private void FinishAutoUpdate()
+    {
+        var message = $"Auto update complete: {autoRetainersCompleted} retainer(s), {autoUpdated} listing(s) repriced, " +
+            $"{autoAlreadyPriced} already at target, {autoSkipped} left unchanged, {autoUnavailableRetainers} unavailable, {autoEmptyRetainers} with no eligible listings.";
+        autoRetainers.Clear();
+        autoRetainerIndex = 0;
+        Finish(message);
     }
 
     private void TickManual(DateTimeOffset now)
@@ -477,6 +718,18 @@ internal sealed class PricingController : IDisposable
             var updated = Rows.Count(row => row.Status == "Updated");
             var unchanged = Rows.Count(row => row.Status == "Already priced");
             var skipped = Rows.Count - updated - unchanged;
+            if (work == Work.AutoUpdateAllRetainers)
+            {
+                autoUpdated += updated;
+                autoAlreadyPriced += unchanged;
+                autoSkipped += skipped;
+                autoRetainersCompleted++;
+                var name = autoRetainers[autoRetainerIndex].Name;
+                Status = $"Auto update · {name} complete: {updated} repriced, {unchanged} already at target, {skipped} left unchanged.";
+                step = Step.AutoCloseSellList;
+                deadline = now.AddSeconds(10);
+                return;
+            }
             Finish($"Existing listing update complete: {updated} updated, {unchanged} already at target, {skipped} left unchanged because a safe price was unavailable.");
             return;
         }
@@ -920,9 +1173,16 @@ internal sealed class PricingController : IDisposable
     {
         var wasBatchListing = work == Work.BatchListing;
         var wasSingleListing = work == Work.Single && autoApply;
+        var wasAutoUpdating = work == Work.AutoUpdateAllRetainers;
         ResetRequest();
         work = Work.Idle;
         manualTarget = null;
+        if (wasAutoUpdating)
+        {
+            autoRetainers.Clear();
+            autoRetainerIndex = 0;
+            session = null;
+        }
         if (wasBatchListing)
         {
             // A batch can stop while its item dialog is still on screen. Don't let the

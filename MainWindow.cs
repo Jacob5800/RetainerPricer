@@ -14,6 +14,7 @@ internal sealed class MainWindow : Window
     private readonly Action save;
     private readonly Action<Action> dispatch;
     private readonly Func<string?> retainerError;
+    private readonly FeedbackClient feedback;
     private string lookupSearch = "";
     private string lookupSearchCache = "";
     private List<ItemChoice> lookupMatches = [];
@@ -31,13 +32,17 @@ internal sealed class MainWindow : Window
     private int batchQuantityInput = 10;
     private int batchMaximumTotalInput;
     private string? batchBulkAddMessage;
+    private string feedbackMessage = "";
+    private string? feedbackStatus;
+    private bool feedbackSending;
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
         Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
-        Func<string?> retainerError) : base("Retainer Pricer")
+        Func<string?> retainerError, FeedbackClient feedback) : base("Retainer Pricer")
     {
         (this.config, this.controller, this.itemChoices, this.homeWorld, this.save, this.dispatch, this.retainerError) =
             (config, controller, itemChoices, homeWorld, save, dispatch, retainerError);
+        this.feedback = feedback;
         if (config.Source != PriceSource.Universalis)
         {
             config.Source = PriceSource.Universalis;
@@ -59,6 +64,16 @@ internal sealed class MainWindow : Window
         if (retainerError() is { } nativeError) ImGui.TextWrapped(nativeError);
         var busy = controller.Busy;
         ImGui.BeginDisabled(busy);
+        if (controller.IsAutoUpdatingAllRetainers)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.12f, 0.48f, 0.2f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.16f, 0.58f, 0.25f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.09f, 0.4f, 0.16f, 1));
+            ImGui.Button("Auto update...");
+            ImGui.PopStyleColor(3);
+        }
+        else if (ImGui.Button("Auto update")) dispatch(controller.AutoUpdateAllRetainers);
+        ImGui.SameLine();
         if (controller.IsListingItemsRunning && !controller.IsBatchSellingOnlyRunning)
         {
             ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.12f, 0.48f, 0.2f, 1));
@@ -69,7 +84,7 @@ internal sealed class MainWindow : Window
         }
         else if (ImGui.Button("Start listing items")) dispatch(controller.StartListingItems);
         ImGui.SameLine();
-        if (controller.IsUpdatingListings)
+        if (controller.IsUpdatingListings && !controller.IsAutoUpdatingAllRetainers)
         {
             ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.12f, 0.48f, 0.2f, 1));
             ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.16f, 0.58f, 0.25f, 1));
@@ -108,7 +123,7 @@ internal sealed class MainWindow : Window
             if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
             ImGui.PopStyleColor(3);
         }
-        ImGui.TextDisabled("Start listing items processes all eligible carried inventory, splitting configured items. Start batch selling only processes just the items on the Batch selling tab. Update existing listings reprices current stock.");
+        ImGui.TextDisabled("Auto update reprices existing listings across your retainers, starting with the open selling list. Start listing items processes eligible carried inventory; batch-only processes the Batch selling tab. Update existing listings handles only the open retainer.");
         if (controller.Busy)
             ImGui.TextDisabled("The active listing task is highlighted. Stop cancels it; changes already submitted remain applied.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
@@ -138,6 +153,7 @@ internal sealed class MainWindow : Window
             if (ImGui.BeginTabItem("Exceptions")) { DrawExceptions(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Batch selling")) { DrawBatchSelling(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Settings")) { DrawSettings(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("?")) { DrawHelp(); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
         }
 
@@ -262,6 +278,91 @@ internal sealed class MainWindow : Window
         ImGui.Separator();
         ImGui.TextWrapped("Prices are per item, before tax. If an undercut would be below your minimum, or no matching competitor is available, that item is left unchanged.");
         ImGui.TextWrapped("Changing character, world, or active retainer stops a batch. Each price submission rechecks the exact item window first. Stop prevents further submissions; completed price changes stay applied.");
+    }
+
+    private void DrawHelp()
+    {
+        if (!ImGui.BeginChild("##helpContents", new Vector2(0, Math.Max(120, ImGui.GetContentRegionAvail().Y)), true))
+        {
+            ImGui.EndChild();
+            return;
+        }
+        ImGui.TextWrapped("Quick guide: set your exclusions and optional batch sizes once, open a retainer's selling list, then choose the action you need.");
+        ImGui.Separator();
+
+        ImGui.TextUnformatted("Top buttons");
+        ImGui.BulletText("Auto update: open any retainer's selling list first. It reprices that retainer, returns to the retainer picker, then visits the rest of your available retainers once. Unavailable retainers are skipped. Stop halts the run; already submitted changes remain applied.");
+        ImGui.BulletText("Start listing items: checks eligible items in your carried inventory and lists them one by one. Exclusions, untradeable items, and items the market does not support are skipped. The run stops when it finishes or the retainer's 20 listing slots are full.");
+        ImGui.BulletText("Update existing listings: reprices eligible listings on the currently open retainer. It checks the market price and recent sales, then applies and verifies a safe price. Items without a usable competitor or a sale in the last 20 days are skipped.");
+        ImGui.BulletText("Start batch selling only: lists only the items in the Batch selling tab. It ignores other inventory and respects each item's per-listing size and optional per-run total.");
+        ImGui.BulletText("Stop: stops further actions in the current run. Any price changes already submitted remain in place.");
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("Tabs");
+        ImGui.BulletText("New / selected item: shows the item sale window currently open in game. Check price again gets a suggestion; Apply price to selling window fills the price without confirming the sale. The automatic new-item option can price and confirm newly opened eligible sale windows.");
+        ImGui.BulletText("Price lookup: search an item and retrieve its price without opening a retainer sale window. This is read-only and never changes a listing. In Captured items, Snapshot inventory or Snapshot retainer listings fills a list with Retrieve, List, and Exclude actions.");
+        ImGui.BulletText("Existing listings: review the results of Update existing listings. Use Exclude beside an item to add it to your exception list.");
+        ImGui.BulletText("Exceptions: items here are skipped by automatic listing and repricing. Refresh carried inventory to find items, filter by name, add a selected item, or add the current marketable inventory at once. Remove an item to allow it again.");
+        ImGui.BulletText("Batch selling: choose items and set the maximum quantity in each listing. The optional total limit caps how much of that item is listed in one batch-only run; 0 means no total cap. Add current inventory adds marketable carried items using the current size and limit.");
+        ImGui.BulletText("Settings: set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, and optionally compare across your Data Center or region. Data Center and region options cannot be used together.");
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("How prices work");
+        ImGui.BulletText("Prices come from Universalis. HQ and normal-quality items are checked separately. The plugin ignores your own retainers and aims for one gil below the lowest matching competitor, while respecting your minimum price.");
+        ImGui.BulletText("Automatic listing and repricing require a current competing listing and a sale within the last 20 days. With the optional age filter off, old price uploads are still allowed; the recent-sale rule remains.");
+        ImGui.BulletText("Prices shown are per item and before tax. If there is no safe price, the plugin leaves that item unchanged.");
+        ImGui.BulletText("Use this on your home world with a retainer's selling list open. Switching character, world, or active retainer, disconnecting, or entering a loading state stops the active run.");
+
+        ImGui.Separator();
+        ImGui.TextUnformatted("Send feedback");
+        ImGui.TextWrapped("Describe what happened, what you expected, and which button or tab you used. Please do not include passwords or account details.");
+        ImGui.InputTextMultiline("##feedbackMessage", ref feedbackMessage, 4001, new Vector2(0, 120));
+        ImGui.TextDisabled($"{feedbackMessage.Length}/4000 characters · your note and plugin version are emailed to the developer; no character or market data is attached.");
+        ImGui.BeginDisabled(!feedback.IsConfigured || feedbackSending || string.IsNullOrWhiteSpace(feedbackMessage) || feedbackMessage.Trim().Length > 4000);
+        if (ImGui.Button(feedbackSending ? "Sending feedback..." : "Send feedback")) StartFeedbackSend();
+        ImGui.EndDisabled();
+        if (!feedback.IsConfigured)
+            ImGui.SameLine();
+        if (!feedback.IsConfigured)
+            ImGui.TextDisabled("Feedback email setup is not finished yet.");
+        if (feedbackStatus is { Length: > 0 } status) ImGui.TextWrapped(status);
+        ImGui.EndChild();
+    }
+
+    private void StartFeedbackSend()
+    {
+        if (feedbackSending || string.IsNullOrWhiteSpace(feedbackMessage)) return;
+        var submittedMessage = feedbackMessage.Trim();
+        var version = typeof(MainWindow).Assembly.GetName().Version;
+        var versionLabel = version is null ? "unknown" : $"{version.Major}.{version.Minor}.{Math.Max(version.Build, 0)}";
+        feedbackSending = true;
+        feedbackStatus = "Sending your note…";
+        _ = SendFeedbackAsync(submittedMessage, versionLabel);
+    }
+
+    private async Task SendFeedbackAsync(string message, string version)
+    {
+        string result;
+        var sent = false;
+        try
+        {
+            await feedback.SendAsync(message, version).ConfigureAwait(false);
+            result = "Feedback sent. Thank you.";
+            sent = true;
+        }
+        catch (Exception ex)
+        {
+            result = ex is InvalidOperationException
+                ? ex.Message
+                : "Feedback could not be sent. Check your connection and try again later.";
+        }
+
+        dispatch(() =>
+        {
+            feedbackSending = false;
+            feedbackStatus = result;
+            if (sent) feedbackMessage = "";
+        });
     }
 
     private void DrawManualLookup()

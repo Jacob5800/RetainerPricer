@@ -17,6 +17,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly PluginConfig config;
     private readonly NativeMarketBridge bridge;
     private readonly UniversalisClient universalis = new();
+    private readonly FeedbackClient feedback = new();
     private readonly PricingController controller;
     private readonly MainWindow window;
     private bool wasOpen;
@@ -43,7 +44,7 @@ public sealed class Plugin : IDalamudPlugin
             .ToHashSet();
         controller = new PricingController(bridge, universalis, config, marketableItemIds);
         window = new MainWindow(config, controller, itemChoices, bridge.GetHomeWorld, Save, Dispatch,
-            () => bridge.RetainerAvailabilityError);
+            () => bridge.RetainerAvailabilityError, feedback);
         windows.AddWindow(window);
         if (bridge.LocalAvailabilityError is { } localCompatibilityError)
             log.Warning("Retainer Pricer local pricing: {Error}", localCompatibilityError);
@@ -100,6 +101,7 @@ public sealed class Plugin : IDalamudPlugin
         controller.Dispose();
         bridge.Dispose();
         universalis.Dispose();
+        feedback.Dispose();
         windows.RemoveAllWindows();
     }
 }
