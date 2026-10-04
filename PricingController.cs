@@ -10,13 +10,6 @@ internal sealed class PriceRow(SellItem item)
 
 internal sealed class PricingController : IDisposable
 {
-    private static int GetExistingListingUpdateDelayMilliseconds()
-    {
-        var band = Random.Shared.Next(100);
-        return band < 70 ? Random.Shared.Next(400, 651)
-            : band < 85 ? Random.Shared.Next(365, 400)
-            : Random.Shared.Next(651, 851);
-    }
     private enum Work { Idle, Single, Manual, Scan, AutoUpdateAllRetainers, BatchListing }
     private enum Step
     {
@@ -796,7 +789,7 @@ internal sealed class PricingController : IDisposable
                 step = Step.Start;
                 workingItem = null;
                 ResetRequest();
-                nextTick = now.AddMilliseconds(GetExistingListingUpdateDelayMilliseconds());
+                nextTick = now;
                 return;
             }
             if (now > deadline)
