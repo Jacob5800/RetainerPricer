@@ -12,5 +12,5 @@
   "LoadSync": false,
   "CanUnloadAsync": true,
   "Punchline": "Automatically price new and existing retainer listings.",
-  "Changelog": "Remove the randomized pause between confirmed existing-listing reprices."
+  "Changelog": "Start Auto update from the retainer picker in top-to-bottom order; cap new listings at 99 and continue larger stacks; remove extra action delays."
 }

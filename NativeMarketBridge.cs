@@ -19,6 +19,8 @@ public sealed record MarketSession(ulong ContentId, ulong RetainerId, uint World
 
 public sealed record RetainerIdentity(ulong RetainerId, string Name);
 
+internal sealed record RetainerPickerEntry(RetainerIdentity Retainer, bool IsAvailable);
+
 public sealed record SellItem(MarketSession Session, uint ItemId, string Name, bool IsHq,
     uint Quantity, uint CurrentPrice, int InventoryType, int Slot, long DialogGeneration = 0)
 {
@@ -198,6 +200,20 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         var manager = RetainerManager.Instance();
         if (manager == null || !manager->IsReady || manager->LastSelectedRetainerId == 0) return false;
         retainerId = manager->LastSelectedRetainerId;
+        return true;
+    }
+
+    public bool TryGetCharacterContext(out ulong contentId, out uint worldId, out string error)
+    {
+        contentId = 0;
+        worldId = 0;
+        if (disposed || !player.IsLoaded || player.ContentId == 0 || player.CurrentWorld.RowId == 0)
+        { error = "Log in before starting Auto update."; return false; }
+        if (player.CurrentWorld.RowId != player.HomeWorld.RowId)
+        { error = "Auto update is available only while you are on your home world."; return false; }
+        contentId = player.ContentId;
+        worldId = player.CurrentWorld.RowId;
+        error = string.Empty;
         return true;
     }
 
@@ -391,6 +407,47 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         return true;
     }
 
+    public bool TryGetRetainerPickerOrder(out IReadOnlyList<RetainerIdentity> retainers, out string error)
+    {
+        retainers = [];
+        if (!TryReadRetainerPickerEntries(out var entries, out error)) return false;
+        retainers = entries.Select(entry => entry.Retainer).ToArray();
+        error = string.Empty;
+        return true;
+    }
+
+    private bool TryReadRetainerPickerEntries(out List<RetainerPickerEntry> entries, out string error)
+    {
+        entries = [];
+        var picker = (AtkUnitBase*)gameGui.GetAddonByName("RetainerList").Address;
+        if (picker == null || !picker->IsReady || !picker->IsVisible)
+        { error = "The retainer picker is not ready."; return false; }
+        if (!TryGetOwnRetainers(out var roster))
+        { error = "The retainer ownership list could not be read safely."; return false; }
+
+        for (var index = 0; index < roster.Count; index++)
+        {
+            var valueIndex = 3 + index * 10;
+            if (picker->AtkValues == null || valueIndex + 8 >= picker->AtkValuesCount)
+            { error = "The retainer picker's visible rows could not be verified."; return false; }
+            ref var nameValue = ref picker->AtkValues[valueIndex];
+            if (nameValue.Type is not (AtkValueType.String or AtkValueType.ManagedString or AtkValueType.ConstString) ||
+                nameValue.String.Value == null)
+            { error = "The retainer picker's row names are unavailable."; return false; }
+            var name = MemoryHelper.ReadSeStringNullTerminated((nint)nameValue.String.Value).TextValue;
+            var matches = roster.Where(retainer => retainer.Name == name).ToArray();
+            if (matches.Length != 1)
+            { error = "A retainer picker row could not be matched uniquely to your roster."; return false; }
+            ref var activeValue = ref picker->AtkValues[valueIndex + 8];
+            if (activeValue.Type != AtkValueType.Bool)
+            { error = "The game's retainer availability flag could not be verified."; return false; }
+            entries.Add(new RetainerPickerEntry(matches[0], activeValue.Bool));
+        }
+        if (entries.Count != roster.Count)
+        { error = "The retainer picker did not show the complete retainer roster."; return false; }
+        error = string.Empty;
+        return true;
+    }
     public bool TryCloseRetainerSellList(MarketSession expected, out string error)
     {
         if (IsSessionIdentityChanged(expected))
@@ -409,39 +466,21 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     public bool TrySelectRetainerById(RetainerIdentity expected, out bool unavailable, out string error)
     {
         unavailable = false;
-        var picker = (AtkUnitBase*)gameGui.GetAddonByName("RetainerList").Address;
-        if (picker == null || !picker->IsReady || !picker->IsVisible)
-        { error = "The retainer picker is not ready."; return false; }
-        if (!TryGetOwnRetainers(out var retainers))
-        { error = "The retainer ownership list could not be read safely."; return false; }
-        if (!retainers.Any(retainer => retainer.RetainerId == expected.RetainerId && retainer.Name == expected.Name))
-        { error = "The queued retainer no longer matches this character's retainer list."; return false; }
+        if (!TryReadRetainerPickerEntries(out var entries, out error)) return false;
 
         var rowIndex = -1;
-        for (var index = 0; index < retainers.Count; index++)
+        for (var index = 0; index < entries.Count; index++)
         {
-            var valueIndex = 3 + index * 10;
-            if (picker->AtkValues == null || valueIndex + 8 >= picker->AtkValuesCount)
-            { error = "The retainer picker's visible rows could not be verified."; return false; }
-            ref var nameValue = ref picker->AtkValues[valueIndex];
-            if (nameValue.Type is not (AtkValueType.String or AtkValueType.ManagedString or AtkValueType.ConstString) ||
-                nameValue.String.Value == null)
-            { error = "The retainer picker's row names are unavailable."; return false; }
-            var name = MemoryHelper.ReadSeStringNullTerminated((nint)nameValue.String.Value).TextValue;
-            if (name == expected.Name)
+            var entry = entries[index];
+            if (entry.Retainer.RetainerId != expected.RetainerId || entry.Retainer.Name != expected.Name) continue;
+            if (rowIndex != -1)
+            { error = "More than one retainer row matches the queued identity; selection was stopped safely."; return false; }
+            rowIndex = index;
+            if (!entry.IsAvailable)
             {
-                if (rowIndex != -1)
-                { error = "More than one retainer has the same displayed name; selection was stopped safely."; return false; }
-                rowIndex = index;
-                ref var activeValue = ref picker->AtkValues[valueIndex + 8];
-                if (activeValue.Type != AtkValueType.Bool)
-                { error = "The game's retainer availability flag could not be verified."; return false; }
-                if (!activeValue.Bool)
-                {
-                    unavailable = true;
-                    error = string.Empty;
-                    return false;
-                }
+                unavailable = true;
+                error = string.Empty;
+                return false;
             }
         }
         if (rowIndex < 0)
@@ -452,11 +491,13 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         callback[1] = new AtkValue { Type = AtkValueType.UInt, UInt = (uint)rowIndex };
         callback[2] = default;
         callback[3] = default;
+        var picker = (AtkUnitBase*)gameGui.GetAddonByName("RetainerList").Address;
+        if (picker == null || !picker->IsReady || !picker->IsVisible)
+        { error = "The retainer picker closed before selection."; return false; }
         picker->FireCallback(4, callback, true);
         error = string.Empty;
         return true;
     }
-
     public bool TrySelectRetainerMenuEntry(Func<string, bool> match, out string selectedText, out string error)
     {
         selectedText = string.Empty;

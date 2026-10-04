@@ -371,33 +371,59 @@ internal sealed class PricingController : IDisposable
         if (!CanStartListingItems) { Status = StartListingAvailabilityError!; return; }
         if (bridge.TryReadSellItem(out _, out _))
         { Status = "Close the individual selling window first, leaving the retainer's selling list open."; return; }
-        if (bridge.IsSellWindowVisible || bridge.IsComparisonVisible || !bridge.IsRetainerSellListVisible)
-        { Status = "Close the item or market comparison window and leave the retainer's selling list open before starting Auto update."; return; }
-        if (!bridge.TryGetSession(out var active, out var error)) { Status = error; return; }
-        if (!bridge.TryGetOwnRetainers(out var retainers) || !bridge.TryGetOwnRetainerIds(out _))
-        { Status = "Retainer ownership data is not ready. Reopen the retainer selling list and try again; no prices will be changed until every retainer can be identified."; return; }
-
-        var activeIndex = -1;
-        for (var i = 0; i < retainers.Count; i++)
-            if (retainers[i].RetainerId == active.RetainerId) { activeIndex = i; break; }
-        if (activeIndex < 0)
-        { Status = "The open retainer could not be matched to your retainer roster."; return; }
+        if (bridge.IsSellWindowVisible || bridge.IsComparisonVisible || bridge.IsRetainerMenuVisible)
+        { Status = "Close the item, market comparison, or retainer option window before starting Auto update."; return; }
+        if (!bridge.TryGetCharacterContext(out var contentId, out var worldId, out var error))
+        { Status = error; return; }
+        if (!bridge.TryGetOwnRetainerIds(out _))
+        { Status = "Retainer ownership data is not ready. Reopen the retainer menu and try again; no prices will be changed until every retainer can be identified."; return; }
 
         autoRetainers.Clear();
-        autoRetainers.Add(retainers[activeIndex]);
-        autoRetainers.AddRange(retainers.Where((_, i) => i != activeIndex));
+        var startedAtPicker = bridge.IsRetainerPickerVisible;
+        if (startedAtPicker)
+        {
+            if (!bridge.TryGetRetainerPickerOrder(out var pickerOrder, out error))
+            { Status = $"Could not read the retainer picker safely: {error}"; return; }
+            autoRetainers.AddRange(pickerOrder);
+            if (autoRetainers.Count == 0)
+            { Status = "The retainer picker did not contain any retainers."; return; }
+            autoContentId = contentId;
+            autoWorldId = worldId;
+            autoLastSelectedRetainerId = bridge.TryGetSelectedRetainerId(out var selectedId) ? selectedId : 0;
+            session = null;
+            step = Step.AutoSelectRetainer;
+        }
+        else
+        {
+            if (!bridge.IsRetainerSellListVisible)
+            { Status = "Open the retainer picker or a retainer's selling list before starting Auto update."; return; }
+            if (!bridge.TryGetSession(out var active, out error)) { Status = error; return; }
+            if (!bridge.TryGetOwnRetainers(out var retainers))
+            { Status = "Retainer ownership data is not ready. Reopen the retainer selling list and try again; no prices will be changed until every retainer can be identified."; return; }
+
+            var activeIndex = -1;
+            for (var i = 0; i < retainers.Count; i++)
+                if (retainers[i].RetainerId == active.RetainerId) { activeIndex = i; break; }
+            if (activeIndex < 0)
+            { Status = "The open retainer could not be matched to your retainer roster."; return; }
+
+            autoRetainers.Add(retainers[activeIndex]);
+            autoRetainers.AddRange(retainers.Where((_, i) => i != activeIndex));
+            autoContentId = active.ContentId;
+            autoWorldId = active.WorldId;
+            autoLastSelectedRetainerId = active.RetainerId;
+            session = active;
+            step = Step.AutoStartRetainer;
+        }
+
         autoRetainerIndex = 0;
         autoRetainersCompleted = autoUnavailableRetainers = autoEmptyRetainers = 0;
         autoUpdated = autoAlreadyPriced = autoSkipped = 0;
-        autoContentId = active.ContentId;
-        autoWorldId = active.WorldId;
-        autoLastSelectedRetainerId = active.RetainerId;
-        session = active;
         workSource = PriceSource.Universalis;
         work = Work.AutoUpdateAllRetainers;
-        step = Step.AutoStartRetainer;
         nextTick = DateTimeOffset.UtcNow;
-        Status = $"Auto update queued for {autoRetainers.Count} retainer(s), starting with {retainers[activeIndex].Name}.";
+        var startDescription = startedAtPicker ? "top-to-bottom from the retainer picker" : $"with {autoRetainers[0].Name}";
+        Status = $"Auto update queued for {autoRetainers.Count} retainer(s), starting {startDescription}.";
     }
 
     private bool TryBeginExistingListingScan(MarketSession active, out int total, out int excluded,
@@ -473,18 +499,17 @@ internal sealed class PricingController : IDisposable
                 {
                     if (!bridge.TryGetSelectedRetainerId(out var menuRetainerId) || menuRetainerId != autoRetainers[autoRetainerIndex].RetainerId)
                     { Cancel("Auto update stopped because the retainer menu did not belong to the retainer just processed."); return; }
-                    if (!bridge.TrySelectRetainerMenuEntry(text => text.Trim().Equals("Quit", StringComparison.OrdinalIgnoreCase), out _, out error))
+                    if (!bridge.TrySelectRetainerMenuEntry(text => text.Trim().TrimEnd('.', '…').Equals("Quit", StringComparison.OrdinalIgnoreCase), out _, out error))
                     { Cancel($"Auto update stopped at the retainer menu: {error}"); return; }
                     session = null;
                     step = Step.AutoWaitPicker;
                     deadline = now.AddSeconds(10);
-                    nextTick = now.AddMilliseconds(350);
                     return;
                 }
                 if (now > deadline) Cancel("Auto update stopped because the retainer option menu did not appear after closing the sale list.");
                 return;
             case Step.AutoWaitPicker:
-                if (bridge.IsRetainerPickerVisible)
+                if (bridge.IsRetainerPickerVisible && !bridge.IsRetainerMenuVisible)
                 {
                     autoRetainerIndex++;
                     if (autoRetainerIndex >= autoRetainers.Count) { FinishAutoUpdate(); return; }
@@ -503,7 +528,6 @@ internal sealed class PricingController : IDisposable
                     autoRetainersCompleted++;
                     autoRetainerIndex++;
                     Status = $"Auto update · skipped {target.Name}: retainer is not currently available.";
-                    nextTick = now.AddMilliseconds(300);
                     if (autoRetainerIndex >= autoRetainers.Count) FinishAutoUpdate();
                     return;
                 }
@@ -515,10 +539,11 @@ internal sealed class PricingController : IDisposable
             case Step.AutoWaitTargetMenu:
             {
                 var expected = autoRetainers[autoRetainerIndex];
-                if (bridge.TryGetSelectedRetainerId(out var selectedId) && selectedId != expected.RetainerId &&
+                if (bridge.TryGetSelectedRetainerId(out var selectedId) && selectedId != 0 && selectedId != expected.RetainerId &&
+                    autoLastSelectedRetainerId != 0 &&
                     selectedId != autoLastSelectedRetainerId)
                 { Cancel("Auto update stopped because the game selected a different retainer than the queued one."); return; }
-                if (selectedId == expected.RetainerId && bridge.IsRetainerMenuVisible)
+                if (selectedId == expected.RetainerId && bridge.IsRetainerMenuVisible && !bridge.IsRetainerPickerVisible)
                 {
                     autoLastSelectedRetainerId = expected.RetainerId;
                     step = Step.AutoSelectSellMenu;
@@ -539,7 +564,6 @@ internal sealed class PricingController : IDisposable
                 { Cancel($"Auto update stopped at {expected.Name}'s option menu: {error}"); return; }
                 step = Step.AutoWaitSellList;
                 deadline = now.AddSeconds(12);
-                nextTick = now.AddMilliseconds(350);
                 return;
             }
             case Step.AutoWaitSellList:
@@ -551,7 +575,6 @@ internal sealed class PricingController : IDisposable
                     { Cancel("Auto update stopped because the active world changed while opening the next retainer."); return; }
                     session = opened;
                     step = Step.AutoStartRetainer;
-                    nextTick = now.AddMilliseconds(350);
                     return;
                 }
                 if (bridge.TryGetSelectedRetainerId(out var selected) && selected != expected.RetainerId && selected != autoLastSelectedRetainerId)
@@ -773,7 +796,6 @@ internal sealed class PricingController : IDisposable
             step = Step.Start;
             workingItem = null;
             ResetRequest();
-            nextTick = now.AddMilliseconds(650);
         }
 
         if (step == Step.Confirming)
@@ -829,7 +851,6 @@ internal sealed class PricingController : IDisposable
                 if (batchMaximumReachedItemIds.Add(candidate.ItemId))
                     Status = $"Reached the {maxTotal:N0}-item total for {candidate.Name}; leaving remaining inventory untouched.";
                 index++;
-                nextTick = now.AddMilliseconds(250);
                 return;
             }
 
@@ -838,7 +859,7 @@ internal sealed class PricingController : IDisposable
                 ? Math.Min(batchSize, candidate.Quantity)
                 : candidate.Quantity;
             var remainingTotal = maxTotal > 0 ? maxTotal - alreadySold : candidate.Quantity;
-            requestedListingQuantity = Math.Min(perListing, remainingTotal);
+            requestedListingQuantity = Math.Min(Math.Min(perListing, remainingTotal), 99);
             preListingSlots = listedBefore.Select(row => row.Slot).ToHashSet();
             if (!bridge.TryOpenInventoryItem(candidate, out var openError))
             { Cancel($"Automatic listing stopped before opening {candidate.Name}: {openError}"); return; }
@@ -968,7 +989,7 @@ internal sealed class PricingController : IDisposable
                 deadline = now.AddSeconds(8);
                 return;
             }
-            CompleteSkippedBatchItem(now);
+            CompleteSkippedBatchItem();
             return;
         }
 
@@ -979,7 +1000,7 @@ internal sealed class PricingController : IDisposable
                 if (now > deadline) Cancel("Automatic listing stopped because the skipped item's sale window did not close. Close it manually before retrying.");
                 return;
             }
-            CompleteSkippedBatchItem(now);
+            CompleteSkippedBatchItem();
             return;
         }
 
@@ -1013,7 +1034,6 @@ internal sealed class PricingController : IDisposable
                     workingItem = null;
                     step = Step.Start;
                     ResetRequest();
-                    nextTick = now.AddMilliseconds(900);
                     Status = $"Listed {submitted.Name} × {submitted.Quantity:N0}. Continuing with the {remaining:N0} remaining item(s) in that stack.";
                     return;
                 }
@@ -1023,7 +1043,6 @@ internal sealed class PricingController : IDisposable
                 listingCandidate = null;
                 workingItem = null;
                 step = Step.Start;
-                nextTick = now.AddMilliseconds(900);
                 Status = $"Listed {submitted.Name} at {listingSubmittedPrice:N0} gil each. Continuing with the next eligible item.";
                 return;
             }
@@ -1048,10 +1067,10 @@ internal sealed class PricingController : IDisposable
             Status = $"{message} Closing its price windows before continuing.";
             return;
         }
-        CompleteSkippedBatchItem(DateTimeOffset.UtcNow);
+        CompleteSkippedBatchItem();
     }
 
-    private void CompleteSkippedBatchItem(DateTimeOffset now)
+    private void CompleteSkippedBatchItem()
     {
         var message = pendingSkipMessage ?? "Skipped item; continuing.";
         listingSkipped++;
@@ -1062,7 +1081,6 @@ internal sealed class PricingController : IDisposable
         step = Step.Start;
         ResetRequest();
         Status = message;
-        nextTick = now.AddMilliseconds(650);
     }
 
     private void FinishBatchListing(string message)

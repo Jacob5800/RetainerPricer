@@ -123,7 +123,7 @@ internal sealed class MainWindow : Window
             if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
             ImGui.PopStyleColor(3);
         }
-        ImGui.TextDisabled("Auto update reprices existing listings across your retainers, starting with the open selling list. Start listing items processes eligible carried inventory; batch-only processes the Batch selling tab. Update existing listings handles only the open retainer.");
+        ImGui.TextDisabled("Auto update can start at the retainer picker and go top-to-bottom, or start with the open selling list. Start listing items processes eligible carried inventory; batch-only processes the Batch selling tab. Update existing listings handles only the open retainer.");
         if (controller.Busy)
             ImGui.TextDisabled("The active listing task is highlighted. Stop cancels it; changes already submitted remain applied.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
@@ -291,10 +291,10 @@ internal sealed class MainWindow : Window
         ImGui.Separator();
 
         ImGui.TextUnformatted("Top buttons");
-        ImGui.BulletText("Auto update: open any retainer's selling list first. It reprices that retainer, returns to the retainer picker, then visits the rest of your available retainers once. Unavailable retainers are skipped. Stop halts the run; already submitted changes remain applied.");
-        ImGui.BulletText("Start listing items: checks eligible items in your carried inventory and lists them one by one. Exclusions, untradeable items, and items the market does not support are skipped. The run stops when it finishes or the retainer's 20 listing slots are full.");
+        ImGui.BulletText("Auto update: start from the retainer picker to visit retainers top-to-bottom, or start from any retainer's selling list to process that one first. It visits each retainer once; unavailable retainers are skipped. Stop halts the run; already submitted changes remain applied.");
+        ImGui.BulletText("Start listing items: checks eligible items in your carried inventory and lists them one by one. No sale exceeds 99 items; larger stacks continue in follow-up listings. Exclusions, untradeable items, and items the market does not support are skipped. The run stops when it finishes or the retainer's 20 listing slots are full.");
         ImGui.BulletText("Update existing listings: reprices eligible listings on the currently open retainer. It checks the market price and recent sales, then applies and verifies a safe price. Items without a usable competitor or a sale in the last 20 days are skipped.");
-        ImGui.BulletText("Start batch selling only: lists only the items in the Batch selling tab. It ignores other inventory and respects each item's per-listing size and optional per-run total.");
+        ImGui.BulletText("Start batch selling only: lists only the items in the Batch selling tab. It ignores other inventory, respects each item's per-listing size and optional per-run total, and caps each sale at 99 items before continuing the remainder.");
         ImGui.BulletText("Stop: stops further actions in the current run. Any price changes already submitted remain in place.");
 
         ImGui.Separator();
