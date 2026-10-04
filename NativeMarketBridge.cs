@@ -625,6 +625,147 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         return OpenRetainerSell(agent, type, checked((ushort)expected.Slot), out error);
     }
 
+    public bool IsVendorShopOpen => GetVendorShopAddon() != null;
+    public bool IsVendorContextMenuOpen => IsAddonVisible("ContextMenu");
+    public bool IsVendorQuantityPromptOpen => IsAddonVisible("InputNumeric");
+    public bool IsVendorConfirmationOpen => IsAddonVisible("SelectYesno");
+
+    public bool TryOpenVendorSellContext(CarriedItemCandidate expected, out string error)
+    {
+        error = string.Empty;
+        var shop = GetVendorShopAddon();
+        if (shop == null)
+        { error = "Open an NPC vendor's Shop window before starting Auto vendor."; return false; }
+        if (IsVendorContextMenuOpen || IsVendorQuantityPromptOpen || IsVendorConfirmationOpen)
+        { error = "Close the current vendor item menu or confirmation before starting Auto vendor."; return false; }
+        var type = (InventoryType)expected.InventoryType;
+        if (type is not (InventoryType.Inventory1 or InventoryType.Inventory2 or InventoryType.Inventory3 or InventoryType.Inventory4))
+        { error = "The selected item is not in carried inventory."; return false; }
+        if (!TryGetStock(type, expected.Slot, out var stock, out error)) return false;
+        if (stock->GetBaseItemId() != expected.ItemId || stock->IsHighQuality() != expected.IsHq ||
+            stock->GetQuantity() != expected.Quantity)
+        { error = "The inventory item changed before it could be sold. The vendor run stopped safely."; return false; }
+        var context = AgentInventoryContext.Instance();
+        if (context == null)
+        { error = "The game's inventory context menu is not available."; return false; }
+        context->OpenForItemSlot(type, expected.Slot, 0, shop->Id);
+        error = string.Empty;
+        return true;
+    }
+
+    public bool TrySelectVendorSell(CarriedItemCandidate expected, out string error)
+    {
+        var shop = GetVendorShopAddon();
+        var menu = (AddonContextMenu*)gameGui.GetAddonByName("ContextMenu").Address;
+        var context = AgentInventoryContext.Instance();
+        if (shop == null || menu == null || !menu->IsReady || !menu->IsVisible || context == null ||
+            context->OwnerAddonId != shop->Id || context->TargetInventoryId != (InventoryType)expected.InventoryType ||
+            context->TargetInventorySlotId != expected.Slot || context->TargetInventorySlot == null ||
+            context->TargetInventorySlot->GetBaseItemId() != expected.ItemId ||
+            context->TargetInventorySlot->IsHighQuality() != expected.IsHq ||
+            context->TargetInventorySlot->GetQuantity() != expected.Quantity)
+        { error = "The vendor menu no longer targets the selected inventory stack. Nothing was sold."; return false; }
+        if (context->ContextCallbackInfos == null || context->ContextItemCount is <= 0 or > 32 ||
+            context->ContexItemStartIndex < 0 || context->ContexItemStartIndex + context->ContextItemCount > 32)
+        { error = "The vendor's item actions could not be verified. Nothing was sold."; return false; }
+
+        var sellIndex = -1;
+        for (var index = 0; index < context->ContextItemCount; index++)
+        {
+            var callbackIndex = context->ContexItemStartIndex + index;
+            var info = &context->ContextCallbackInfos[callbackIndex];
+            if (info->LabelId == 0) continue;
+            var label = data.GetExcelSheet<Addon>().GetRow(info->LabelId).Text.ToString().Trim();
+            if (!StringComparer.CurrentCultureIgnoreCase.Equals(label, "Sell")) continue;
+            if (sellIndex >= 0)
+            { error = "The vendor menu has multiple Sell actions; no choice was made."; return false; }
+            sellIndex = callbackIndex;
+        }
+        if (sellIndex < 0 || context->IsContextItemDisabled(sellIndex))
+        { error = "A usable Sell action was not found in the vendor menu. Nothing was sold."; return false; }
+        if (!menu->OnMenuSelected(sellIndex, 0))
+        { error = "The game did not accept the vendor Sell action."; return false; }
+        error = string.Empty;
+        return true;
+    }
+
+    public bool TrySetVendorSaleQuantity(CarriedItemCandidate expected, out string error)
+    {
+        var addon = (AddonInputNumeric*)gameGui.GetAddonByName("InputNumeric").Address;
+        var shop = GetVendorShopAddon();
+        var context = AgentInventoryContext.Instance();
+        if (addon == null || !addon->IsReady || !addon->IsVisible || addon->NumericInput == null ||
+            addon->OkButton == null || shop == null || context == null || context->OwnerAddonId != shop->Id ||
+            context->TargetInventoryId != (InventoryType)expected.InventoryType ||
+            context->TargetInventorySlotId != expected.Slot || context->TargetInventorySlot == null ||
+            context->TargetInventorySlot->GetBaseItemId() != expected.ItemId ||
+            context->TargetInventorySlot->IsHighQuality() != expected.IsHq)
+        { error = "The vendor quantity prompt could not be matched to the selected item."; return false; }
+        var minimum = addon->TypedAtkValues->MinValue.UInt;
+        var maximum = addon->TypedAtkValues->MaxValue.UInt;
+        if (expected.Quantity > int.MaxValue || expected.Quantity < minimum || expected.Quantity > maximum)
+        { error = "The vendor quantity prompt does not allow selling this full stack."; return false; }
+        addon->NumericInput->InnerSetValue((int)expected.Quantity, true, false);
+        if (addon->NumericInput->Value != expected.Quantity)
+        { error = "The vendor quantity field did not accept the full stack amount."; return false; }
+        return ClickRegisteredButton(addon->OkButton, (AtkUnitBase*)addon, out error);
+    }
+
+    public bool TryConfirmVendorSale(CarriedItemCandidate expected, out string error)
+    {
+        var addon = (AddonSelectYesno*)gameGui.GetAddonByName("SelectYesno").Address;
+        if (addon == null || !addon->IsReady || !addon->IsVisible || addon->PromptText == null || addon->YesButton == null)
+        { error = "The vendor confirmation prompt is not ready."; return false; }
+        var prompt = addon->PromptText->NodeText.ToString();
+        if (!prompt.Contains(expected.Name, StringComparison.CurrentCultureIgnoreCase))
+        { error = "The confirmation prompt does not name the selected item. It was left unconfirmed."; return false; }
+        return ClickRegisteredButton(addon->YesButton, (AtkUnitBase*)addon, out error);
+    }
+
+    public bool TryCancelVendorPrompt(CarriedItemCandidate expected)
+    {
+        var numeric = (AddonInputNumeric*)gameGui.GetAddonByName("InputNumeric").Address;
+        var shop = GetVendorShopAddon();
+        var context = AgentInventoryContext.Instance();
+        if (numeric != null && numeric->IsReady && numeric->IsVisible && numeric->CancelButton != null &&
+            shop != null && context != null && context->OwnerAddonId == shop->Id &&
+            context->TargetInventoryId == (InventoryType)expected.InventoryType &&
+            context->TargetInventorySlotId == expected.Slot && context->TargetInventorySlot != null &&
+            context->TargetInventorySlot->GetBaseItemId() == expected.ItemId &&
+            context->TargetInventorySlot->IsHighQuality() == expected.IsHq)
+            return ClickRegisteredButton(numeric->CancelButton, (AtkUnitBase*)numeric, out _);
+
+        var yesno = (AddonSelectYesno*)gameGui.GetAddonByName("SelectYesno").Address;
+        if (yesno != null && yesno->IsReady && yesno->IsVisible && yesno->NoButton != null &&
+            yesno->PromptText != null && yesno->PromptText->NodeText.ToString().Contains(expected.Name,
+                StringComparison.CurrentCultureIgnoreCase))
+            return ClickRegisteredButton(yesno->NoButton, (AtkUnitBase*)yesno, out _);
+        return false;
+    }
+
+    public bool TryGetCarriedItemTotal(uint itemId, bool isHq, out uint quantity, out string error)
+    {
+        quantity = 0;
+        var inventory = InventoryManager.Instance();
+        if (inventory == null) { error = "The carried inventory is not available."; return false; }
+        foreach (var type in new[] { InventoryType.Inventory1, InventoryType.Inventory2,
+                     InventoryType.Inventory3, InventoryType.Inventory4 })
+        {
+            var container = inventory->GetInventoryContainer(type);
+            if (container == null || !container->IsLoaded)
+            { error = "The carried inventory is still updating."; return false; }
+            for (var slot = 0; slot < container->Size; slot++)
+            {
+                var stock = container->GetInventorySlot(slot);
+                if (stock == null || stock->IsEmpty() || stock->GetBaseItemId() != itemId || stock->IsHighQuality() != isHq)
+                    continue;
+                quantity = checked(quantity + stock->GetQuantity());
+            }
+        }
+        error = string.Empty;
+        return true;
+    }
+
     private bool OpenRetainerSell(AgentRetainer* agent, InventoryType inventoryType, ushort slot, out string error)
     {
         if (openRetainerSell is null)
@@ -809,6 +950,12 @@ public sealed unsafe class NativeMarketBridge : IDisposable
             DialogGeneration++;
         }
         return addon;
+    }
+
+    private AddonShop* GetVendorShopAddon()
+    {
+        var addon = (AddonShop*)gameGui.GetAddonByName("Shop").Address;
+        return addon != null && addon->IsReady && addon->IsVisible ? addon : null;
     }
 
     private bool IsAddonReady(string name)

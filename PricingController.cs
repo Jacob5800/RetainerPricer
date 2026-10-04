@@ -885,6 +885,20 @@ internal sealed class PricingController : IDisposable
             if (!marketableItemIds.Contains(candidate.ItemId) || IsExcluded(candidate.ItemId))
             { SkipBatchItem("Skipped an item that is now excluded or not marketable."); return; }
 
+            // Listing one stack can leave inventory slots compacted or otherwise shifted by the game.
+            // Resolve the next planned item against current inventory before opening it, while still
+            // validating the exact item/quality/quantity again in the sale window below.
+            var currentInventory = bridge.ReadCarriedInventory(marketableItemIds, config.ExcludedItemIds.ToHashSet(),
+                out _, out _, out var inventoryRefreshError);
+            if (inventoryRefreshError.Length != 0)
+            { Cancel($"Automatic listing stopped because carried inventory could not be refreshed: {inventoryRefreshError}"); return; }
+            var currentCandidate = currentInventory.FirstOrDefault(item =>
+                item.ItemId == candidate.ItemId && item.IsHq == candidate.IsHq);
+            if (currentCandidate is null)
+            { SkipBatchItem($"Skipped {candidate.Name}: no matching stack remains in carried inventory."); return; }
+            candidate = currentCandidate;
+            batchCandidates[index] = candidate;
+
             var maxTotal = batchSellingOnly ? config.BatchSaleMaxQuantities.GetValueOrDefault(candidate.ItemId) : 0;
             var alreadySold = batchSoldQuantitiesByItemId.GetValueOrDefault(candidate.ItemId);
             if (maxTotal > 0 && alreadySold >= maxTotal)
@@ -1060,22 +1074,25 @@ internal sealed class PricingController : IDisposable
                 var remaining = expected.Quantity - submitted.Quantity;
                 if (remaining > 0)
                 {
-                    if (!bridge.TryReadCarriedStackQuantity(expected, out var currentQuantity, out var inventoryError))
-                    { Cancel($"The listing was confirmed, but the remaining {submitted.Name} stack could not be verified: {inventoryError}"); return; }
-                    if (currentQuantity != remaining)
+                    var currentInventory = bridge.ReadCarriedInventory(marketableItemIds, config.ExcludedItemIds.ToHashSet(),
+                        out _, out _, out var inventoryError);
+                    var remainingStack = inventoryError.Length == 0
+                        ? currentInventory.FirstOrDefault(item => item.ItemId == expected.ItemId && item.IsHq == expected.IsHq)
+                        : null;
+                    if (remainingStack is null)
                     {
                         if (now > deadline)
                         { Cancel($"The listing was confirmed, but the remaining {submitted.Name} quantity could not be verified. Check the retainer and inventory before restarting."); return; }
                         Status = $"{submitted.Name} was listed. Waiting for its remaining inventory stack to update before splitting it again...";
                         return;
                     }
-                    batchCandidates[index] = expected with { Quantity = remaining };
+                    batchCandidates[index] = remainingStack;
                     listingSucceeded++;
                     listingCandidate = null;
                     workingItem = null;
                     step = Step.Start;
                     ResetRequest();
-                    Status = $"Listed {submitted.Name} × {submitted.Quantity:N0}. Continuing with the {remaining:N0} remaining item(s) in that stack.";
+                    Status = $"Listed {submitted.Name} × {submitted.Quantity:N0}. Continuing with the {remainingStack.Quantity:N0} item(s) remaining in carried inventory.";
                     return;
                 }
 

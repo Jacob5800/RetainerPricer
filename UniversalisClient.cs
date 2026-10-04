@@ -16,6 +16,7 @@ namespace RetainerPricer;
 public sealed class UniversalisClient : IDisposable
 {
     private enum ScopeKind { World, DataCenter, Region }
+    private sealed record DataCenterInfo(string Name, string Region, IReadOnlyList<uint> Worlds);
 
     private const int MaximumResponseBytes = 1_048_576;
     private const int MaximumHistoryResponseBytes = 32 * 1_048_576;
@@ -37,7 +38,7 @@ public sealed class UniversalisClient : IDisposable
     private readonly object cacheLock = new();
     private readonly Dictionary<(string Scope, uint Item), PriceSnapshot> cache = [];
     private readonly SemaphoreSlim dataCenterRegionLock = new(1, 1);
-    private IReadOnlyDictionary<string, string>? dataCenterRegions;
+    private IReadOnlyDictionary<string, DataCenterInfo>? dataCenters;
 
     public UniversalisClient() : this(new HttpClient(new HttpClientHandler
     {
@@ -143,11 +144,54 @@ public sealed class UniversalisClient : IDisposable
         }
     }
 
-    public async Task<IReadOnlyDictionary<uint, SniperSalesSnapshot>> FetchSniperSalesBatchAsync(
-        uint worldId, IReadOnlyList<uint> itemIds, int historyDays, CancellationToken ct = default)
+    internal async Task<SniperMarketScope> ResolveSniperMarketScopeAsync(MarketWorld world,
+        bool useDataCenter, bool useRegion, CancellationToken ct = default)
     {
-        if (worldId == 0 || itemIds.Count is 0 or > SniperHistoryBatchSize || itemIds.Any(itemId => itemId == 0))
-            throw new ArgumentException($"Select 1 to {SniperHistoryBatchSize} valid items and a selling world before fetching sales history.");
+        if (world.WorldId == 0) throw new ArgumentException("Select a valid home world before watching listings.");
+        if (!useRegion && !useDataCenter)
+            return new SniperMarketScope(world.Name, [new SniperHistoryScope(
+                world.WorldId.ToString(CultureInfo.InvariantCulture), SniperHistoryScopeKind.World)], [world.WorldId]);
+
+        if (string.IsNullOrWhiteSpace(world.DataCenterName))
+            throw new InvalidOperationException("Could not identify your home world's Data Center for the selected Sniper scope.");
+
+        var centers = await GetDataCentersAsync(ct).ConfigureAwait(false);
+        if (!centers.TryGetValue(world.DataCenterName, out var homeCenter))
+            throw new InvalidOperationException($"Universalis could not map the home Data Center '{world.DataCenterName}'.");
+
+        if (!useRegion)
+        {
+            return new SniperMarketScope($"{homeCenter.Name} Data Center",
+                [new SniperHistoryScope(homeCenter.Name, SniperHistoryScopeKind.DataCenter)],
+                homeCenter.Worlds.Distinct().ToArray());
+        }
+
+        var matchingCenters = centers.Values.Where(center =>
+                StringComparer.OrdinalIgnoreCase.Equals(center.Region, homeCenter.Region) ||
+                !StringComparer.OrdinalIgnoreCase.Equals(homeCenter.Region, "Oceania") &&
+                StringComparer.OrdinalIgnoreCase.Equals(center.Region, "Oceania"))
+            .ToArray();
+        var historyRegions = StringComparer.OrdinalIgnoreCase.Equals(homeCenter.Region, "Oceania")
+            ? new[] { "Oceania" }
+            : new[] { homeCenter.Region, "Oceania" };
+        var worldIds = matchingCenters.SelectMany(center => center.Worlds).Distinct().ToArray();
+        if (worldIds.Length == 0)
+            throw new InvalidOperationException($"Universalis returned no worlds for the {homeCenter.Region} region scope.");
+        var label = StringComparer.OrdinalIgnoreCase.Equals(homeCenter.Region, "Oceania")
+            ? "Oceania (Materia)"
+            : $"{homeCenter.Region} + Oceania (Materia)";
+        return new SniperMarketScope(label,
+            historyRegions.Select(region => new SniperHistoryScope(region, SniperHistoryScopeKind.Region)).ToArray(),
+            worldIds);
+    }
+
+    internal async Task<IReadOnlyDictionary<uint, SniperSalesSnapshot>> FetchSniperSalesBatchAsync(
+        SniperHistoryScope scope, IReadOnlyList<uint> itemIds, int historyDays, uint homeWorldId,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(scope.Name) || itemIds.Count is 0 or > SniperHistoryBatchSize ||
+            itemIds.Any(itemId => itemId == 0) || homeWorldId == 0)
+            throw new ArgumentException($"Select a valid market scope, 1 to {SniperHistoryBatchSize} items, and a home world before fetching sales history.");
         historyDays = Math.Clamp(historyDays, 3, 14);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(HistoryRequestTimeout);
@@ -155,9 +199,10 @@ public sealed class UniversalisClient : IDisposable
         {
             var itemIdsPath = string.Join(',', itemIds.Distinct());
             var historyWindowSeconds = historyDays * 24 * 60 * 60;
-            var path = $"history/{worldId}/{itemIdsPath}?entriesToReturn={SniperHistoryEntryLimit}&entriesWithin={historyWindowSeconds}";
+            var escapedScope = Uri.EscapeDataString(scope.Name);
+            var path = $"history/{escapedScope}/{itemIdsPath}?entriesToReturn={SniperHistoryEntryLimit}&entriesWithin={historyWindowSeconds}";
             var json = await RequestHistoryJsonAsync(path, deadline.Token).ConfigureAwait(false);
-            return ParseSniperSalesBatch(json, worldId, itemIds, historyDays, DateTimeOffset.UtcNow);
+            return ParseSniperSalesBatch(json, scope, homeWorldId, itemIds, historyDays, DateTimeOffset.UtcNow);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -210,7 +255,8 @@ public sealed class UniversalisClient : IDisposable
     }
 
     private static IReadOnlyDictionary<uint, SniperSalesSnapshot> ParseSniperSalesBatch(
-        byte[] json, uint worldId, IReadOnlyList<uint> itemIds, int historyDays, DateTimeOffset retrievedAt)
+        byte[] json, SniperHistoryScope scope, uint homeWorldId, IReadOnlyList<uint> itemIds,
+        int historyDays, DateTimeOffset retrievedAt)
     {
         try
         {
@@ -218,9 +264,22 @@ public sealed class UniversalisClient : IDisposable
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 throw new InvalidOperationException("Universalis returned unusable sales history.");
-            if (root.TryGetProperty("worldID", out var returnedWorld) &&
-                (!returnedWorld.TryGetUInt32(out var parsedWorld) || parsedWorld != worldId))
-                throw new InvalidOperationException("Universalis sales history belongs to another world.");
+            var scopeProperty = scope.Kind switch
+            {
+                SniperHistoryScopeKind.World => "worldID",
+                SniperHistoryScopeKind.DataCenter => "dcName",
+                _ => "regionName",
+            };
+            if (scope.Kind == SniperHistoryScopeKind.World)
+            {
+                if (!root.TryGetProperty(scopeProperty, out var returnedWorld) ||
+                    !returnedWorld.TryGetUInt32(out var parsedWorld) ||
+                    !StringComparer.Ordinal.Equals(parsedWorld.ToString(CultureInfo.InvariantCulture), scope.Name))
+                    throw new InvalidOperationException("Universalis sales history belongs to another world.");
+            }
+            else if (!root.TryGetProperty(scopeProperty, out var returnedScope) || returnedScope.ValueKind != JsonValueKind.String ||
+                     !StringComparer.OrdinalIgnoreCase.Equals(returnedScope.GetString(), scope.Name))
+                throw new InvalidOperationException("Universalis sales history does not match the selected market scope.");
 
             var results = new Dictionary<uint, SniperSalesSnapshot>();
             if (root.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Object)
@@ -231,16 +290,14 @@ public sealed class UniversalisClient : IDisposable
                         entryRoot.ValueKind != JsonValueKind.Object ||
                         !entryRoot.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array)
                         continue;
-                    results[itemId] = new SniperSalesSnapshot(itemId, worldId, retrievedAt,
-                        ParseSniperQualities(entries, retrievedAt, historyDays));
+                    results[itemId] = ParseSniperItem(itemId, homeWorldId, entries, retrievedAt, historyDays);
                 }
             }
             else if (itemIds.Distinct().Take(2).Count() == 1 && root.TryGetProperty("entries", out var entries) &&
                      entries.ValueKind == JsonValueKind.Array)
             {
                 var itemId = itemIds.Distinct().Single();
-                results[itemId] = new SniperSalesSnapshot(itemId, worldId, retrievedAt,
-                    ParseSniperQualities(entries, retrievedAt, historyDays));
+                results[itemId] = ParseSniperItem(itemId, homeWorldId, entries, retrievedAt, historyDays);
             }
             else if (itemIds.Distinct().Take(2).Count() == 1)
                 throw new InvalidOperationException("Universalis returned malformed sales history.");
@@ -252,11 +309,11 @@ public sealed class UniversalisClient : IDisposable
         }
     }
 
-    private static IReadOnlyList<SniperQualityBaseline> ParseSniperQualities(
-        JsonElement entries, DateTimeOffset retrievedAt, int historyDays)
+    private static SniperSalesSnapshot ParseSniperItem(uint itemId, uint homeWorldId, JsonElement entries,
+        DateTimeOffset retrievedAt, int historyDays)
     {
         var minimumTimestamp = retrievedAt.AddDays(-historyDays).ToUnixTimeSeconds();
-        var prices = new Dictionary<bool, List<uint>> { [false] = [], [true] = [] };
+        var sales = new List<SniperSale>();
         foreach (var entry in entries.EnumerateArray())
         {
             if (entry.ValueKind != JsonValueKind.Object ||
@@ -265,29 +322,37 @@ public sealed class UniversalisClient : IDisposable
                 !entry.TryGetProperty("pricePerUnit", out var price) || !price.TryGetUInt32(out var gil) || gil == 0 ||
                 !entry.TryGetProperty("hq", out var hq) || hq.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                 continue;
-            prices[hq.GetBoolean()].Add(gil);
+            sales.Add(new SniperSale(gil, hq.GetBoolean()));
         }
 
         var qualities = new List<SniperQualityBaseline>(2);
-        foreach (var quality in prices)
+        foreach (var quality in sales.GroupBy(sale => sale.IsHq))
         {
-            if (quality.Value.Count == 0) continue;
-            quality.Value.Sort();
-            var middle = quality.Value.Count / 2;
-            var median = quality.Value.Count % 2 == 0
-                ? (uint)(((ulong)quality.Value[middle - 1] + quality.Value[middle]) / 2)
-                : quality.Value[middle];
-            qualities.Add(new SniperQualityBaseline(quality.Key, quality.Value.Count, median));
+            var ordered = quality.Select(sale => sale.PricePerUnit).OrderBy(price => price).ToArray();
+            if (ordered.Length == 0) continue;
+            var middle = ordered.Length / 2;
+            var median = ordered.Length % 2 == 0
+                ? (uint)(((ulong)ordered[middle - 1] + ordered[middle]) / 2)
+                : ordered[middle];
+            qualities.Add(new SniperQualityBaseline(quality.Key, ordered.Length, median));
         }
-        return qualities.AsReadOnly();
+        return new SniperSalesSnapshot(itemId, homeWorldId, retrievedAt, qualities.AsReadOnly(), sales.AsReadOnly());
     }
 
     private async Task<string> GetRegionForDataCenterAsync(string dataCenterName, CancellationToken ct)
     {
+        var centers = await GetDataCentersAsync(ct).ConfigureAwait(false);
+        if (!centers.TryGetValue(dataCenterName, out var info))
+            throw new InvalidOperationException($"Universalis could not map the home Data Center '{dataCenterName}' to a region.");
+        return info.Region;
+    }
+
+    private async Task<IReadOnlyDictionary<string, DataCenterInfo>> GetDataCentersAsync(CancellationToken ct)
+    {
         await dataCenterRegionLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (dataCenterRegions is null)
+            if (dataCenters is null)
             {
                 var json = await RequestJsonAsync("data-centers", "Data Center information", ct).ConfigureAwait(false);
                 try
@@ -295,22 +360,26 @@ public sealed class UniversalisClient : IDisposable
                     using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 16 });
                     if (document.RootElement.ValueKind != JsonValueKind.Array)
                         throw new InvalidOperationException("Universalis returned invalid Data Center information.");
-                    var regions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    var centers = new Dictionary<string, DataCenterInfo>(StringComparer.OrdinalIgnoreCase);
                     foreach (var entry in document.RootElement.EnumerateArray())
                     {
                         if (entry.ValueKind != JsonValueKind.Object ||
                             !entry.TryGetProperty("name", out var name) || name.ValueKind != JsonValueKind.String ||
-                            !entry.TryGetProperty("region", out var region) || region.ValueKind != JsonValueKind.String)
+                            !entry.TryGetProperty("region", out var region) || region.ValueKind != JsonValueKind.String ||
+                            !entry.TryGetProperty("worlds", out var worlds) || worlds.ValueKind != JsonValueKind.Array)
                             throw new InvalidOperationException("Universalis returned incomplete Data Center information.");
                         var dcName = name.GetString();
                         var regionValue = region.GetString();
                         if (string.IsNullOrWhiteSpace(dcName) || string.IsNullOrWhiteSpace(regionValue))
                             throw new InvalidOperationException("Universalis returned incomplete Data Center information.");
-                        regions[dcName] = regionValue;
+                        var worldIds = worlds.EnumerateArray()
+                            .Where(world => world.TryGetUInt32(out var id) && id != 0)
+                            .Select(world => world.GetUInt32()).Distinct().ToArray();
+                        centers[dcName] = new DataCenterInfo(dcName, regionValue, worldIds);
                     }
-                    if (regions.Count == 0)
+                    if (centers.Count == 0)
                         throw new InvalidOperationException("Universalis returned no Data Center information.");
-                    dataCenterRegions = regions;
+                    dataCenters = centers;
                 }
                 catch (JsonException ex)
                 {
@@ -318,9 +387,7 @@ public sealed class UniversalisClient : IDisposable
                 }
             }
 
-            if (!dataCenterRegions.TryGetValue(dataCenterName, out var regionName))
-                throw new InvalidOperationException($"Universalis could not map the home Data Center '{dataCenterName}' to a region.");
-            return regionName;
+            return dataCenters;
         }
         finally { dataCenterRegionLock.Release(); }
     }

@@ -17,6 +17,7 @@ internal sealed class MainWindow : Window
     private readonly Func<string?> retainerError;
     private readonly FeedbackClient feedback;
     private readonly SniperMonitor sniper;
+    private readonly AutoVendorController vendor;
     private string lookupSearch = "";
     private string lookupSearchCache = "";
     private List<ItemChoice> lookupMatches = [];
@@ -44,12 +45,13 @@ internal sealed class MainWindow : Window
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
         Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
-        Func<string?> retainerError, FeedbackClient feedback, SniperMonitor sniper) : base("Retainer Pricer")
+        Func<string?> retainerError, FeedbackClient feedback, SniperMonitor sniper, AutoVendorController vendor) : base("Retainer Pricer")
     {
         (this.config, this.controller, this.itemChoices, this.homeWorld, this.save, this.dispatch, this.retainerError) =
             (config, controller, itemChoices, homeWorld, save, dispatch, retainerError);
         this.feedback = feedback;
         this.sniper = sniper;
+        this.vendor = vendor;
         if (config.Source != PriceSource.Universalis)
         {
             config.Source = PriceSource.Universalis;
@@ -69,7 +71,7 @@ internal sealed class MainWindow : Window
             : "your home world";
         ImGui.TextWrapped($"Universalis prices use {priceScope}. HQ and NQ are compared separately; your own retainers are excluded.");
         if (retainerError() is { } nativeError) ImGui.TextWrapped(nativeError);
-        var busy = controller.Busy;
+        var busy = controller.Busy || vendor.IsRunning;
         ImGui.BeginDisabled(busy);
         if (controller.IsAutoUpdatingAllRetainers)
         {
@@ -127,14 +129,18 @@ internal sealed class MainWindow : Window
             ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.68f, 0.12f, 0.12f, 1));
             ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.82f, 0.18f, 0.18f, 1));
             ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.55f, 0.08f, 0.08f, 1));
-            if (ImGui.Button("Stop")) dispatch(() => controller.Cancel());
+            if (ImGui.Button("Stop")) dispatch(() =>
+            {
+                if (vendor.IsRunning) vendor.Cancel();
+                else controller.Cancel();
+            });
             ImGui.PopStyleColor(3);
         }
         ImGui.TextDisabled("Auto update can start at the retainer picker and go top-to-bottom, or start with the open selling list. Start listing items processes eligible carried inventory; batch-only processes the Batch selling tab. Update existing listings handles only the open retainer.");
         if (controller.Busy)
             ImGui.TextDisabled("The active listing task is highlighted. Stop cancels it; changes already submitted remain applied.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
-        ImGui.BeginDisabled(controller.Busy);
+        ImGui.BeginDisabled(controller.Busy || sniper.IsRunning || vendor.IsRunning);
         var automatic = config.AutoPriceNewListings;
         if (ImGui.Checkbox("Automatically price and confirm new listings", ref automatic)) { config.AutoPriceNewListings = automatic; save(); }
         ImGui.TextDisabled("This checkbox auto-prices only the currently opened sale item. Use Start listing items to process all eligible inventory and continue through the list automatically.");
@@ -147,7 +153,7 @@ internal sealed class MainWindow : Window
         ImGui.EndDisabled();
         ImGui.Separator();
 
-        ImGui.TextWrapped(controller.Status);
+        ImGui.TextWrapped(vendor.IsRunning ? vendor.Status : controller.Status);
         if (controller.Busy)
         {
             if (!string.IsNullOrEmpty(controller.Progress)) ImGui.TextUnformatted(controller.Progress);
@@ -161,6 +167,7 @@ internal sealed class MainWindow : Window
             if (ImGui.BeginTabItem("Exceptions")) { DrawExceptions(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Don't reprice")) { DrawNoReprice(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Batch selling")) { DrawBatchSelling(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("Auto vendor")) { DrawAutoVendor(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Settings")) { DrawSettings(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("?")) { DrawHelp(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Sniper")) { DrawSniper(); ImGui.EndTabItem(); }
@@ -280,7 +287,7 @@ internal sealed class MainWindow : Window
 
     private void DrawSettings()
     {
-        ImGui.BeginDisabled(controller.Busy);
+        ImGui.BeginDisabled(controller.Busy || sniper.IsRunning || vendor.IsRunning);
         var minimum = config.MinimumPrice;
         ImGui.SetNextItemWidth(160);
         if (ImGui.InputInt("Minimum price per item (gil)", ref minimum))
@@ -347,7 +354,8 @@ internal sealed class MainWindow : Window
         ImGui.BulletText("Exceptions: items here are skipped by automatic listing and repricing. Refresh carried inventory to find items, filter by name, add a selected item, or add the current marketable inventory at once. Remove an item to allow it again.");
         ImGui.BulletText("Don't reprice: block price changes to existing listings through Update existing listings, Auto update, or the current-item price controls. Read-only lookups still work. These items can still be listed from your carried inventory; use Exceptions to skip both listing and repricing.");
         ImGui.BulletText("Batch selling: choose items and set the maximum quantity in each listing. The optional total limit caps how much of that item is listed in one batch-only run; 0 means no total cap. Add current inventory adds marketable carried items using the current size and limit.");
-        ImGui.BulletText("Sniper: Start watching scans all marketable items on your home world in batches of up to 100, spacing history queries at least one second apart, then listens for new listings. Set a 3–14 day sale-history window and deal threshold. New 1-gil listings are flagged for manual review; the plugin never buys automatically.");
+        ImGui.BulletText("Auto vendor: open an NPC vendor Shop window, set the price threshold, and start vendoring. Eligible carried stacks with a complete Universalis listing at or below the threshold are sold to the vendor; exclusions, unmarketable items, missing prices, and your own retainer listings are skipped. Verify every item before starting because vendor sales cannot be undone.");
+        ImGui.BulletText("Sniper: Start watching scans all marketable items in the selected world, Data Center, or region scope in batches of up to 100, spacing history queries at least one second apart, then listens for new listings across the same scope. Set a 3–14 day sale-history window and deal threshold. New 1-gil listings are flagged for manual review; the plugin never buys automatically.");
         ImGui.BulletText("Settings: set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, and optionally compare across your Data Center or region. Data Center and region options cannot be used together.");
 
         ImGui.Separator();
@@ -375,7 +383,15 @@ internal sealed class MainWindow : Window
 
     private void DrawSniper()
     {
-        ImGui.TextWrapped("Start watching to scan every marketable item on your home world, then listen for new listings. Sniper highlights deals and 1-gil listings for you to review; it never buys automatically.");
+        var world = homeWorld();
+        var marketScope = config.UseRegionPrices
+            ? "your home-world region plus Oceania (Materia)"
+            : config.UseDataCenterPrices
+                ? world?.DataCenterName is { Length: > 0 } dataCenterName
+                    ? $"the {dataCenterName} Data Center"
+                    : "your home-world Data Center"
+                : "your home world";
+        ImGui.TextWrapped($"Start watching to scan every marketable item in {marketScope}, then listen for new listings across the same scope. Sniper highlights deals and 1-gil listings for you to review; it never buys automatically.");
         ImGui.TextDisabled("History is requested in batches of up to 100 items, with at least 1 second between batch requests. The all-item scan can take a little while; Stop watching cancels it.");
 
         var isRunning = sniper.IsRunning;
@@ -410,13 +426,12 @@ internal sealed class MainWindow : Window
         ImGui.EndDisabled();
 
         ImGui.Separator();
-        ImGui.TextUnformatted($"Search scope · all {sniper.MarketableItemCount:N0} marketable items on your home world");
+        ImGui.TextUnformatted($"Search scope · all {sniper.MarketableItemCount:N0} marketable items · {marketScope}");
         ImGui.TextDisabled("Start watching fetches the configured sales window in 100-item calls, builds separate HQ/NQ medians, then opens the live listing feed.");
 
         ImGui.Separator();
-        var world = homeWorld();
         ImGui.BeginDisabled(isRunning || world is null);
-        if (ImGui.Button("Start watching")) sniper.Start(world);
+        if (ImGui.Button("Start watching")) sniper.Start(world, config.UseDataCenterPrices, config.UseRegionPrices);
         ImGui.EndDisabled();
         if (sniper.IsRunning)
         {
@@ -467,6 +482,47 @@ internal sealed class MainWindow : Window
             }
             ImGui.EndTable();
         }
+    }
+
+    private void DrawAutoVendor()
+    {
+        var scope = config.UseRegionPrices
+            ? "the home-world region plus Oceania (Materia)"
+            : config.UseDataCenterPrices
+                ? $"the {homeWorld()?.DataCenterName ?? "home-world"} Data Center"
+                : "your home world";
+        ImGui.TextWrapped("Auto vendor checks carried marketable inventory and sells whole stacks whose matching HQ/NQ market listing is at or below the threshold. It uses the price scope from Settings and always skips exclusions and your own retainer listings.");
+        ImGui.TextWrapped("Open an NPC vendor's Shop window before starting. Auto vendor checks each stack with Universalis, selects the vendor's Sell action, confirms the full stack, and verifies the inventory change before continuing.");
+        ImGui.TextDisabled($"Price scope: {scope}. A missing, incomplete, or failed price check is skipped. Vendor sales cannot be undone; add items to Exceptions before starting if you want to keep them.");
+
+        ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
+        var threshold = config.AutoVendorPriceThreshold;
+        ImGui.SetNextItemWidth(170);
+        if (ImGui.InputInt("Sell at or below (gil per item)", ref threshold))
+        {
+            config.AutoVendorPriceThreshold = threshold;
+            config.Normalize();
+            save();
+        }
+        ImGui.EndDisabled();
+
+        if (!vendor.IsRunning)
+        {
+            ImGui.BeginDisabled(controller.Busy);
+            if (ImGui.Button("Start vendoring")) dispatch(vendor.Start);
+            ImGui.EndDisabled();
+        }
+        else
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.12f, 0.48f, 0.2f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.16f, 0.58f, 0.25f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.09f, 0.4f, 0.16f, 1));
+            ImGui.Button("Vendoring…");
+            ImGui.PopStyleColor(3);
+            ImGui.SameLine();
+            ImGui.TextDisabled($"{vendor.Progress} / {vendor.CandidateCount} stacks");
+        }
+        ImGui.TextWrapped(vendor.Status);
     }
 
     private void StartFeedbackSend()
