@@ -1,3 +1,12 @@
+> [!IMPORTANT]
+> **This plugin has moved.** The canonical source and releases are now in [Jacob5800's consolidated Dalamud plugins](https://github.com/Jacob5800/DalamudPlugins/tree/main/plugins/RetainerPricer). New development and updates happen there.
+>
+> To receive future updates, add the shared Dalamud feed in XIVLauncher/Dalamud Settings → Experimental → Custom Plugin Repositories:
+> `https://raw.githubusercontent.com/Jacob5800/DalamudPlugins/main/repo.json`
+> Once switched, remove this standalone repository's feed URL. Keep this repository as a historical copy only.
+
+---
+
 # Retainer Pricer
 
 Dalamud API 15 plugin for pricing items in the retainer sale window.
@@ -23,4 +32,4 @@ Universalis requests for pricing are on demand and limited to the selected item 
 
 ## Install
 
-In Dalamud Settings → Experimental → Custom Plugin Repositories, add `https://raw.githubusercontent.com/Jacob5800/RetainerPricer/main/repo.json` for installer updates.
+In Dalamud Settings → Experimental → Custom Plugin Repositories, add `https://raw.githubusercontent.com/Jacob5800/DalamudPlugins/main/repo.json` for installer updates.

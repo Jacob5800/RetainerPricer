@@ -1,8 +1,7 @@
-# Retainer Pricer release rules
+# Retainer Pricer migration notice
 
-- For every release, update `Changelog` in `RetainerPricer.json` with concise, user-facing notes for that version.
-- Keep `scripts/Update-RepoManifest.ps1` copying `Changelog` into the custom `repo.json` entry. The script rejects releases with no changelog.
-- Before publishing, verify that the packaged plugin manifest and generated repository feed both contain the changelog and the same assembly version.
-- On every release, bump the project and plugin manifest versions, and verify the small version label at the bottom-left of the plugin menu reports that release version.
-- Keep the batch selling documentation in `README.md` aligned with batch controls, including bulk inventory add and the per-run total quantity cap.
-- For every release, review and update the plugin's `?` tab in `MainWindow.DrawHelp()` so its instructions match the current buttons, tabs, settings, and behavior; verify the release version reminder as part of the menu review.
+This standalone repository is a historical copy. Do not implement plugin code changes, change versions/manifests/workflows, or publish plugin releases here.
+
+The canonical source and release workflow are in [Jacob5800/DalamudPlugins](https://github.com/Jacob5800/DalamudPlugins/tree/main/plugins/RetainerPricer). Make all future Retainer Pricer changes in that repository and follow its root [AGENTS.md](https://github.com/Jacob5800/DalamudPlugins/blob/main/AGENTS.md).
+
+The shared in-game Dalamud feed is [repo.json](https://raw.githubusercontent.com/Jacob5800/DalamudPlugins/main/repo.json). Keep this repository's migration notice in place; do not copy new changes back here.
