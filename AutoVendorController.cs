@@ -70,7 +70,7 @@ internal sealed class AutoVendorController : IDisposable
         cancellation.Dispose();
         cancellation = new CancellationTokenSource();
         step = Step.Begin;
-        Status = $"Checking {candidates.Count} carried stack(s) against Universalis. Items priced at or below {priceThreshold:N0} gil will be sold to the open vendor; excluded items are skipped.";
+        Status = $"Checking {candidates.Count} carried stack(s) against Universalis. Items priced at or below {priceThreshold:N0} gil will be sold; items on the Auto vendor list bypass the price check.";
     }
 
     public void Update()
@@ -104,7 +104,7 @@ internal sealed class AutoVendorController : IDisposable
     {
         if (index >= candidates.Count)
         {
-            Finish($"Auto vendor complete. Checked {candidates.Count} carried stack(s). {priceThreshold:N0}-gil threshold; all qualifying items were sold or skipped safely.");
+            Finish($"Auto vendor complete. Checked {candidates.Count} carried stack(s) using the {priceThreshold:N0}-gil threshold and Auto vendor list.");
             return;
         }
         if (world is null || bridge.GetHomeWorld()?.WorldId != world.WorldId)
@@ -129,9 +129,16 @@ internal sealed class AutoVendorController : IDisposable
             out _, out _, out var inventoryError);
         if (inventoryError.Length != 0)
         { Cancel($"Auto vendor stopped because inventory could not be refreshed: {inventoryError}"); return; }
-        candidate = inventory.FirstOrDefault(item => item.ItemId == planned.ItemId && item.IsHq == planned.IsHq);
+        candidate = inventory.FirstOrDefault(item => item.InventoryType == planned.InventoryType && item.Slot == planned.Slot &&
+            item.ItemId == planned.ItemId && item.IsHq == planned.IsHq);
         if (candidate is null)
         { Skip($"Skipped {planned.Name}: no matching carried stack remains."); return; }
+
+        if (config.AutoVendorItemIds.Contains(candidate.ItemId))
+        {
+            PrepareVendorSale(candidate, $"{candidate.Name} is on the Auto vendor list; preparing its vendor sale without checking market price…");
+            return;
+        }
 
         priceTask = universalis.FetchAsync(world.WorldId, candidate.ItemId, cancellation.Token,
             cacheMinutes, dataCenterName, useRegionPrices);
@@ -167,13 +174,18 @@ internal sealed class AutoVendorController : IDisposable
         { Skip($"Skipped {item.Name}: no competing {(item.IsHq ? "HQ" : "NQ")} market listing was found."); return; }
         if (lowest.Value > priceThreshold)
         { Skip($"Kept {item.Name}: lowest matching market listing is {lowest.Value:N0} gil, above the {priceThreshold:N0}-gil threshold."); return; }
+        PrepareVendorSale(item, $"{item.Name} is listed at {lowest.Value:N0} gil · preparing its vendor sale…");
+    }
+
+    private void PrepareVendorSale(CarriedItemCandidate item, string status)
+    {
         if (!bridge.TryGetCarriedItemTotal(item.ItemId, item.IsHq, out quantityBefore, out var countError))
         { Cancel($"Auto vendor stopped before selling {item.Name}: {countError}"); return; }
         targetReduction = item.Quantity;
         if (quantityBefore < targetReduction)
         { Cancel($"Auto vendor stopped because the carried quantity for {item.Name} changed unexpectedly."); return; }
         step = Step.Sell;
-        Status = $"{item.Name} is listed at {lowest.Value:N0} gil · preparing its vendor sale…";
+        Status = status;
     }
 
     private void SellCurrentItem()

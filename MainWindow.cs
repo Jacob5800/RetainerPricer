@@ -14,6 +14,7 @@ internal sealed class MainWindow : Window
     private readonly Func<MarketWorld?> homeWorld;
     private readonly Action save;
     private readonly Action<Action> dispatch;
+    private readonly Action updateServerInfoBarButton;
     private readonly Func<string?> retainerError;
     private readonly FeedbackClient feedback;
     private readonly SniperMonitor sniper;
@@ -39,12 +40,17 @@ internal sealed class MainWindow : Window
     private int batchQuantityInput = 10;
     private int batchMaximumTotalInput;
     private string? batchBulkAddMessage;
+    private string autoVendorSearch = "";
+    private string autoVendorSearchCache = "";
+    private List<ItemChoice> autoVendorMatches = [];
+    private ItemChoice? autoVendorSelection;
+    private string? autoVendorBulkAddMessage;
     private string feedbackMessage = "";
     private string? feedbackStatus;
     private bool feedbackSending;
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
-        Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch,
+        Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch, Action updateServerInfoBarButton,
         Func<string?> retainerError, FeedbackClient feedback, SniperMonitor sniper, AutoVendorController vendor) : base("Retainer Pricer")
     {
         (this.config, this.controller, this.itemChoices, this.homeWorld, this.save, this.dispatch, this.retainerError) =
@@ -52,6 +58,7 @@ internal sealed class MainWindow : Window
         this.feedback = feedback;
         this.sniper = sniper;
         this.vendor = vendor;
+        this.updateServerInfoBarButton = updateServerInfoBarButton;
         if (config.Source != PriceSource.Universalis)
         {
             config.Source = PriceSource.Universalis;
@@ -347,6 +354,14 @@ internal sealed class MainWindow : Window
             : "Off by default. Turn this on to include every Data Center in your home-world region and Materia (Oceania).");
         var open = config.OpenWithRetainer;
         if (ImGui.Checkbox("Open this window with the retainer selling list", ref open)) { config.OpenWithRetainer = open; save(); }
+        var showServerInfoBarButton = config.ShowServerInfoBarButton;
+        if (ImGui.Checkbox("Show button in server info bar", ref showServerInfoBarButton))
+        {
+            config.ShowServerInfoBarButton = showServerInfoBarButton;
+            save();
+            updateServerInfoBarButton();
+        }
+        ImGui.TextDisabled("Off by default. Click the button beside the in-game world and time display to open Retainer Pricer.");
         ImGui.EndDisabled();
         ImGui.Separator();
         ImGui.TextWrapped("Prices are per item, before tax. If an undercut would be below your minimum, or no matching competitor is available, that item is left unchanged.");
@@ -379,9 +394,9 @@ internal sealed class MainWindow : Window
         ImGui.BulletText("Exceptions: items here are skipped by automatic listing and repricing. Items assigned to saved gear sets are automatically protected too; they do not need to be added here. Refresh carried inventory to find items, filter by name, add a selected item, or add the current marketable inventory at once. Remove an exception to allow that item again unless a saved gear set still uses it.");
         ImGui.BulletText("Don't reprice: block price changes to existing listings through Update existing listings, Auto update, or the current-item price controls. Read-only lookups still work. These items can still be listed from your carried inventory; use Exceptions to skip both listing and repricing.");
         ImGui.BulletText("Batch selling: choose items and set the maximum quantity in each listing. The optional total limit caps how much of that item is listed in one batch-only run; 0 means no total cap. Add current inventory adds marketable carried items using the current size and limit.");
-        ImGui.BulletText("Auto vendor: open an NPC vendor Shop window, set the price threshold, and start vendoring. Eligible carried stacks with a complete Universalis listing at or below the threshold are sold to the vendor; Exceptions, saved gear-set items, bound items, unmarketable items, missing prices, and your own retainer listings are skipped. The game’s vendor sale action sells the checked stack directly, then the plugin verifies the inventory change before continuing. Vendor sales cannot be undone.");
+        ImGui.BulletText("Auto vendor: open an NPC vendor Shop window, set the price threshold, and start vendoring. Eligible carried stacks with a complete Universalis listing at or below the threshold are sold; items on the Auto vendor list bypass the price check. Exceptions and saved gear-set, bound, untradeable, or nonmarketable items remain protected. Vendor sales cannot be undone.");
         ImGui.BulletText("Sniper: Start watching scans all marketable items in the selected world, Data Center, or region scope in batches of up to 100, spacing history queries at least one second apart, then listens for new listings across the same scope. Set the sale-history window, deal threshold as a percentage of the median (91% by default), minimum sales, and minimum listing value. Ordinary deals below the minimum value are hidden; 1-gil alerts always show. Click the Server header to group by server and the Listing header to sort prices high-to-low or low-to-high. Purchases are manual.");
-        ImGui.BulletText("Settings: set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, and optionally compare across your Data Center or region. Data Center and region options cannot be used together.");
+        ImGui.BulletText("Settings: set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, optionally compare across your Data Center or region, and show a button beside the game's world/time display to open this window. Data Center and region options cannot be used together.");
 
         ImGui.Separator();
         ImGui.TextUnformatted("How prices work");
@@ -560,8 +575,8 @@ internal sealed class MainWindow : Window
             : config.UseDataCenterPrices
                 ? $"the {homeWorld()?.DataCenterName ?? "home-world"} Data Center"
                 : "your home world";
-        ImGui.TextWrapped("Auto vendor checks carried marketable inventory and sells whole stacks whose matching HQ/NQ market listing is at or below the threshold. It uses the price scope from Settings and always skips Exceptions, items assigned to saved gear sets, and your own retainer listings.");
-        ImGui.TextWrapped("Open an NPC vendor's Shop window before starting. Auto vendor checks each stack with Universalis, calls the game's vendor sale action for its verified inventory slot, then confirms the inventory change before continuing. It closes an already-open item menu belonging to this vendor before continuing; bound gear is skipped.");
+        ImGui.TextWrapped("Auto vendor checks carried inventory and sells whole eligible stacks whose matching HQ/NQ market listing is at or below the threshold. Items on the Auto vendor list bypass the threshold and price lookup. It uses the price scope from Settings.");
+        ImGui.TextWrapped("Open an NPC vendor's Shop window before starting. Exceptions and saved gear-set items take priority over the Auto vendor list; bound, untradeable, and nonmarketable items are also skipped. Vendor sales cannot be undone.");
         ImGui.TextDisabled($"Price scope: {scope}. A missing, incomplete, or failed price check is skipped. Vendor sales cannot be undone; add items to Exceptions before starting if you want to keep them. Saved gear-set items are protected automatically.");
 
         ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
@@ -574,6 +589,8 @@ internal sealed class MainWindow : Window
             save();
         }
         ImGui.EndDisabled();
+
+        DrawAutoVendorList();
 
         if (!vendor.IsRunning)
         {
@@ -592,6 +609,134 @@ internal sealed class MainWindow : Window
             ImGui.TextDisabled($"{vendor.Progress} / {vendor.CandidateCount} stacks");
         }
         ImGui.TextWrapped(vendor.Status);
+    }
+
+    private void DrawAutoVendorList()
+    {
+        ImGui.Separator();
+        ImGui.TextUnformatted("Auto vendor list");
+        ImGui.TextWrapped("Items on this list are always sent to the vendor when they are in carried inventory, without checking their market price. Exceptions, saved gear-set items, bound items, and untradeable or nonmarketable items are still skipped.");
+
+        ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
+        if (ImGui.Button(controller.ExceptionInventorySnapshotAt is null ? "Grab carried inventory" : "Refresh item picker"))
+            dispatch(controller.SnapshotExceptionInventory);
+        ImGui.EndDisabled();
+        if (controller.ExceptionInventorySnapshotError is { } snapshotError)
+            ImGui.TextWrapped(snapshotError);
+        else if (controller.ExceptionInventorySnapshotAt is { } snapshotAt)
+            ImGui.TextDisabled($"Inventory picker refreshed · {controller.ExceptionInventoryCandidates.Count} marketable stack(s) · {snapshotAt:HH:mm:ss}.");
+
+        ImGui.SetNextItemWidth(360);
+        ImGui.InputText("Search item names", ref autoVendorSearch, 128);
+        if (!StringComparer.CurrentCultureIgnoreCase.Equals(autoVendorSearch, autoVendorSearchCache))
+            autoVendorSelection = null;
+        RefreshMatches(autoVendorSearch, ref autoVendorSearchCache, ref autoVendorMatches);
+
+        var inventoryItems = controller.ExceptionInventoryCandidates
+            .GroupBy(item => item.ItemId)
+            .Select(group => new ItemChoice(group.Key, group.First().Name));
+        var pickerItems = inventoryItems.Concat(autoVendorMatches)
+            .Where(item => !config.AutoVendorItemIds.Contains(item.ItemId))
+            .GroupBy(item => item.ItemId).Select(group => group.First()).ToList();
+        var preview = autoVendorSelection is { } selected
+            ? $"{selected.Name}  ·  #{selected.ItemId}"
+            : "Select an inventory or matching item...";
+        ImGui.SetNextItemWidth(420);
+        if (ImGui.BeginCombo("Item to always vendor", preview))
+        {
+            if (pickerItems.Count == 0)
+                ImGui.TextDisabled(autoVendorSearch.Trim().Length < 2
+                    ? "Grab carried inventory or enter at least two characters to search."
+                    : "No unlisted inventory items or matching names found.");
+            foreach (var item in pickerItems)
+            {
+                var label = $"{item.Name}  ·  #{item.ItemId}";
+                if (ImGui.Selectable(label, autoVendorSelection?.ItemId == item.ItemId))
+                    autoVendorSelection = item;
+            }
+            ImGui.EndCombo();
+        }
+
+        var canAdd = autoVendorSelection is { } choice && !config.AutoVendorItemIds.Contains(choice.ItemId);
+        ImGui.BeginDisabled(controller.Busy || vendor.IsRunning || !canAdd);
+        if (ImGui.Button("Add to Auto vendor list") && autoVendorSelection is { } addChoice)
+        {
+            config.AutoVendorItemIds.Add(addChoice.ItemId);
+            config.Normalize();
+            save();
+            autoVendorSelection = null;
+            autoVendorBulkAddMessage = null;
+        }
+        ImGui.EndDisabled();
+        ImGui.SameLine();
+        ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
+        if (ImGui.Button("Add current inventory"))
+            dispatch(AddCurrentInventoryToAutoVendor);
+        ImGui.EndDisabled();
+        if (autoVendorBulkAddMessage is { Length: > 0 } bulkMessage)
+            ImGui.TextDisabled(bulkMessage);
+
+        ImGui.Separator();
+        ImGui.TextUnformatted($"Always vendor · {config.AutoVendorItemIds.Count} item(s)");
+        if (config.AutoVendorItemIds.Count == 0)
+        {
+            ImGui.TextDisabled("No items on this list. Add an item to let it bypass the market-price threshold.");
+            return;
+        }
+        var listVisible = ImGui.BeginChild("##autoVendorList", new Vector2(0, 170), true);
+        if (listVisible)
+        {
+            foreach (var itemId in config.AutoVendorItemIds
+                         .OrderBy(id => itemChoices.FirstOrDefault(item => item.ItemId == id)?.Name ?? $"Item {id}")
+                         .ToArray())
+            {
+                var name = itemChoices.FirstOrDefault(item => item.ItemId == itemId)?.Name
+                    ?? controller.ExceptionInventoryCandidates.FirstOrDefault(item => item.ItemId == itemId)?.Name
+                    ?? $"Item {itemId}";
+                ImGui.PushID((int)itemId);
+                ImGui.TextUnformatted($"{name}  ·  #{itemId}");
+                ImGui.SameLine();
+                ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
+                if (ImGui.SmallButton("Remove"))
+                {
+                    config.AutoVendorItemIds.Remove(itemId);
+                    config.Normalize();
+                    save();
+                }
+                ImGui.EndDisabled();
+                ImGui.PopID();
+            }
+        }
+        ImGui.EndChild();
+    }
+
+    private void AddCurrentInventoryToAutoVendor()
+    {
+        if (controller.Busy || vendor.IsRunning) return;
+        controller.SnapshotExceptionInventory();
+        if (controller.ExceptionInventorySnapshotError is { } snapshotError)
+        {
+            autoVendorBulkAddMessage = $"Could not add current inventory: {snapshotError}";
+            return;
+        }
+
+        var inventoryIds = controller.ExceptionInventoryCandidates
+            .Where(item => !config.ExcludedItemIds.Contains(item.ItemId))
+            .Select(item => item.ItemId)
+            .Distinct()
+            .ToArray();
+        var newIds = inventoryIds.Where(itemId => !config.AutoVendorItemIds.Contains(itemId)).ToArray();
+        if (newIds.Length > 0)
+        {
+            config.AutoVendorItemIds.AddRange(newIds);
+            config.Normalize();
+            save();
+        }
+
+        autoVendorSelection = null;
+        autoVendorBulkAddMessage = inventoryIds.Length == 0
+            ? "No eligible carried items to add; excluded and unmarketable items are skipped."
+            : $"Added {newIds.Length} item(s); {inventoryIds.Length - newIds.Length} were already on the list.";
     }
 
     private void StartFeedbackSend()

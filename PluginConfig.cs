@@ -13,8 +13,10 @@ public sealed class PluginConfig : IPluginConfiguration
     public int UniversalisCacheMinutes { get; set; } = 5;
     public bool UseDataCenterPrices { get; set; }
     public bool UseRegionPrices { get; set; }
+    public bool ShowServerInfoBarButton { get; set; }
     public int MinimumPrice { get; set; } = 1;
     public int AutoVendorPriceThreshold { get; set; } = 1;
+    public List<uint> AutoVendorItemIds { get; set; } = [];
     public int PriceDropUnder10KPercent { get; set; } = 50;
     public int PriceDrop10KTo999KPercent { get; set; } = 25;
     public int PriceDrop1MTo9999KPercent { get; set; } = 10;
@@ -42,6 +44,7 @@ public sealed class PluginConfig : IPluginConfiguration
         PriceDrop1MTo9999KPercent = Math.Clamp(PriceDrop1MTo9999KPercent, 1, 99);
         PriceDrop10MPlusPercent = Math.Clamp(PriceDrop10MPlusPercent, 1, 99);
         ExcludedItemIds = (ExcludedItemIds ?? []).Where(id => id != 0).Distinct().ToList();
+        AutoVendorItemIds = (AutoVendorItemIds ?? []).Where(id => id != 0).Distinct().ToList();
         NoRepriceItemIds = (NoRepriceItemIds ?? []).Where(id => id != 0).Distinct().ToList();
         BatchSaleQuantities = (BatchSaleQuantities ?? []).Where(pair => pair.Key != 0)
             .ToDictionary(pair => pair.Key, pair => (uint)Math.Clamp((long)pair.Value, 1, 9_999));
