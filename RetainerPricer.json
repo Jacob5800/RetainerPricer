@@ -2,7 +2,7 @@
   "Author": "Jacob5800",
   "Name": "Retainer Pricer",
   "InternalName": "RetainerPricer",
-  "AssemblyVersion": "0.4.8.0",
+  "AssemblyVersion": "0.4.9.0",
   "Description": "Automatically price eligible inventory and reprice existing listings one gil below matching competition using Universalis market prices and recent sale history.",
   "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
   "ApplicableVersion": "any",
@@ -12,5 +12,5 @@
   "LoadSync": false,
   "CanUnloadAsync": true,
   "Punchline": "Automatically price new and existing retainer listings.",
-  "Changelog": "Items assigned to saved gear sets are now automatically protected from automatic listing, repricing, Auto update, and Auto vendor. Protection follows your saved gear sets and pauses automatic actions if gear-set data is unavailable."
+  "Changelog": "Added an Auto vendor list for items to sell regardless of market price, while keeping Exceptions, saved gear sets, and item eligibility protections in effect. Added an optional server info bar button that opens Retainer Pricer and a Discord invite button beside Send feedback."
 }

@@ -1,13 +1,13 @@
 # TODO
 
-## Unreleased — Auto vendor list and server info bar button
+## v0.4.9 — Auto vendor list and quick links
 
 Implemented:
 
 - Added an Auto vendor-only list with item search, add/remove controls, and Add current inventory. Listed items bypass market-price lookups and the threshold, while Exceptions, saved gear-set protection, and marketability/binding checks still take priority.
 - Added an optional, off-by-default Dalamud server info bar button. Clicking **RP** opens the Retainer Pricer window.
 - Added a Discord invite button beside **Send feedback** at the bottom of the `?` tab.
-- Updated the in-plugin `?` help and README for both features.
+- Updated the in-plugin `?` help, README, project and plugin manifest versions, and release changelog.
 
 Pending in-game observation:
 
