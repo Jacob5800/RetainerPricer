@@ -74,6 +74,7 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         condition[ConditionFlag.LoggingOut] || condition[ConditionFlag.SystemError];
     public bool IsRetainerPickerVisible => IsAddonVisible("RetainerList");
     public bool IsRetainerMenuVisible => IsAddonVisible("SelectString");
+    public bool IsRetainerDialogueVisible => IsAddonVisible("Talk");
     public bool IsRetainerSellListVisible => IsAddonVisible("RetainerSellList");
     public bool IsLocalSearchBusy
     {
@@ -524,6 +525,35 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         var callback = stackalloc AtkValue[1];
         callback[0] = new AtkValue { Type = AtkValueType.Int, Int = matchIndex };
         menu->FireCallback(1, callback, true);
+        error = string.Empty;
+        return true;
+    }
+
+    public bool TryAdvanceRetainerDialogue(RetainerIdentity expected, out string error)
+    {
+        var addon = (AtkUnitBase*)gameGui.GetAddonByName("Talk").Address;
+        if (addon == null || !addon->IsReady || !addon->IsVisible)
+        { error = "The retainer dialogue is no longer open."; return false; }
+        if (!TryGetSelectedRetainerId(out var selectedId) || selectedId != expected.RetainerId)
+        { error = "The selected retainer no longer matches the queued retainer."; return false; }
+
+        var stage = AtkStage.Instance();
+        if (stage == null)
+        { error = "The game's dialogue input handler is not available."; return false; }
+
+        // Advance only the greeting for the retainer Auto update just selected.
+        var click = stackalloc AtkEvent[1];
+        click[0] = new AtkEvent
+        {
+            Listener = (AtkEventListener*)addon,
+            Target = &stage->AtkEventTarget,
+            State = new() { StateFlags = (AtkEventStateFlags)132 }
+        };
+        var data = stackalloc AtkEventData[1];
+        data[0] = default;
+        addon->ReceiveEvent(AtkEventType.MouseDown, 0, click, data);
+        addon->ReceiveEvent(AtkEventType.MouseClick, 0, click, data);
+        addon->ReceiveEvent(AtkEventType.MouseUp, 0, click, data);
         error = string.Empty;
         return true;
     }

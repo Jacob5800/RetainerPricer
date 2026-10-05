@@ -48,7 +48,8 @@ internal sealed class SniperMonitor : IDisposable
             status = $"Preparing to scan {watchedItems.Count:N0} marketable items using the selected market scope…";
         }
         _ = Task.Run(() => RunAsync(world, useDataCenter, useRegion, watchedItems, Math.Clamp(config.SniperMinimumSales14Days, 1, 1_800),
-            Math.Clamp(config.SniperThresholdFraction, 0.01, 1.0), Math.Clamp(config.SniperHistoryDays, 3, 14), run.Token));
+            Math.Clamp(config.SniperThresholdFraction, 0.01, 1.0), Math.Clamp(config.SniperHistoryDays, 3, 14),
+            Math.Clamp(config.SniperMinimumItemPrice, 1, 999_999_999), run.Token));
     }
 
     public void Stop()
@@ -60,7 +61,7 @@ internal sealed class SniperMonitor : IDisposable
     }
 
     private async Task RunAsync(MarketWorld world, bool useDataCenter, bool useRegion,
-        IReadOnlyList<ItemChoice> watchedItems, int minimumSales, double threshold, int historyDays,
+        IReadOnlyList<ItemChoice> watchedItems, int minimumSales, double threshold, int historyDays, int minimumItemPrice,
         CancellationToken cancellationToken)
     {
         try
@@ -176,7 +177,8 @@ internal sealed class SniperMonitor : IDisposable
                                 continue;
                             var isOneGilAlert = listing.PricePerUnit == 1;
                             var hasBaseline = baselines.TryGetValue((listing.ItemId, listing.IsHq), out var baseline);
-                            if (!isOneGilAlert && (!hasBaseline || listing.PricePerUnit > baseline!.MedianSalePrice * threshold))
+                            if (!isOneGilAlert && (listing.PricePerUnit < minimumItemPrice || !hasBaseline ||
+                                listing.PricePerUnit > baseline!.MedianSalePrice * threshold))
                                 continue;
                             var listingWorldName = worldNames.TryGetValue(listing.WorldId, out var resolvedWorldName)
                                 ? resolvedWorldName : listing.WorldId == world.WorldId ? world.Name : $"World {listing.WorldId}";

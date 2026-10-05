@@ -218,9 +218,33 @@ internal sealed class MainWindow : Window
 
     private void DrawExisting()
     {
-        ImGui.TextWrapped("The Update existing listings button checks eligible items against Universalis, undercuts comparable listings by one gil, and verifies the retainer accepted each change. Excluded and Don't reprice items are skipped.");
+        ImGui.TextWrapped("The Update existing listings button checks eligible items against Universalis, undercuts comparable listings by one gil, and verifies the retainer accepted each change. Excluded and Don't reprice items are skipped. Large price drops use the configurable review bands below for both Update existing listings and Auto update.");
         if (controller.ExistingUpdateError is { } updateError) ImGui.TextWrapped(updateError);
         if (controller.ExistingApplyError is { } applyError) ImGui.TextWrapped(applyError);
+        ImGui.TextUnformatted("Large price-drop review bands");
+        ImGui.TextDisabled("A proposal is held when it falls by more than the selected percentage from the current listing price.");
+        ImGui.BeginDisabled(controller.Busy || sniper.IsRunning || vendor.IsRunning);
+        var under10K = config.PriceDropUnder10KPercent;
+        ImGui.SetNextItemWidth(145);
+        if (ImGui.InputInt("1–9,999 gil (%)", ref under10K))
+        { config.PriceDropUnder10KPercent = under10K; config.Normalize(); save(); }
+        ImGui.SameLine();
+        var from10KTo999K = config.PriceDrop10KTo999KPercent;
+        ImGui.SetNextItemWidth(175);
+        if (ImGui.InputInt("10,000–999,999 gil (%)", ref from10KTo999K))
+        { config.PriceDrop10KTo999KPercent = from10KTo999K; config.Normalize(); save(); }
+        ImGui.NewLine();
+        var from1MTo9999K = config.PriceDrop1MTo9999KPercent;
+        ImGui.SetNextItemWidth(175);
+        if (ImGui.InputInt("1m–9,999,999 gil (%)", ref from1MTo9999K))
+        { config.PriceDrop1MTo9999KPercent = from1MTo9999K; config.Normalize(); save(); }
+        ImGui.SameLine();
+        var from10M = config.PriceDrop10MPlusPercent;
+        ImGui.SetNextItemWidth(135);
+        if (ImGui.InputInt("10m+ gil (%)", ref from10M))
+        { config.PriceDrop10MPlusPercent = from10M; config.Normalize(); save(); }
+        ImGui.EndDisabled();
+        ImGui.Separator();
         if (controller.Rows.Count == 0) return;
         if (ImGui.BeginTable("##existingPrices", 8, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY
             | ImGuiTableFlags.Resizable, new Vector2(0, Math.Max(150, ImGui.GetContentRegionAvail().Y - 30))))
@@ -265,12 +289,12 @@ internal sealed class MainWindow : Window
 
         ImGui.OpenPopup(PriceDropReviewPopup);
         if (!ImGui.BeginPopupModal(PriceDropReviewPopup, ImGuiWindowFlags.AlwaysAutoResize)) return;
-        ImGui.TextWrapped("The proposed price is more than 50% below this listing's current price. It was skipped while the rest of this retainer was processed.");
+        ImGui.TextWrapped($"The proposed price is more than {row.PriceDropReviewThresholdPercent}% below this listing's current price. It was held while the rest of this retainer was processed.");
         ImGui.Separator();
         ImGui.TextUnformatted($"{row.Item.Name}{(row.Item.IsHq ? " (HQ)" : " (NQ)")}");
         ImGui.TextUnformatted($"Current: {row.Item.CurrentPrice:N0} gil each");
         ImGui.TextUnformatted($"Proposed: {row.Proposal?.SuggestedPrice:N0} gil each");
-        ImGui.TextDisabled("Approving retrieves the price again and applies only the fresh result. Auto update will continue to the next retainer after all held items are reviewed.");
+        ImGui.TextDisabled("The percentage comes from the current listing price's band in Existing listings. Approving retrieves the price again and applies only the fresh result. Auto update continues to the next retainer after all held items are reviewed.");
         if (ImGui.Button("Still undercut regardless"))
         {
             ImGui.CloseCurrentPopup();
@@ -340,9 +364,9 @@ internal sealed class MainWindow : Window
         ImGui.Separator();
 
         ImGui.TextUnformatted("Top buttons");
-        ImGui.BulletText("Auto update: start from the retainer picker to visit retainers top-to-bottom, or start from any retainer's selling list to process that one first. It visits each retainer once; unavailable retainers are skipped. Stop halts the run; already submitted changes remain applied.");
+        ImGui.BulletText("Auto update: start from the retainer picker to visit retainers top-to-bottom, or start from any retainer's selling list to process that one first. It visits each retainer once, advances the greeting dialogue to reach its menu, and skips unavailable retainers. Stop halts the run; already submitted changes remain applied.");
         ImGui.BulletText("Start listing items: checks eligible items in your carried inventory and lists them one by one. No sale exceeds 99 items; larger stacks continue in follow-up listings. Exclusions, untradeable items, and items the market does not support are skipped. The run stops when it finishes or the retainer's 20 listing slots are full.");
-        ImGui.BulletText("Update existing listings: reprices eligible listings on the currently open retainer. A suggested price more than 50% below your current price is held for review at the end of that retainer; approve it to recheck and apply, or ignore it. Auto update pauses at the same review before moving to the next retainer.");
+        ImGui.BulletText("Update existing listings: reprices eligible listings on the currently open retainer. A proposed price drop above the configurable percentage for its current-price band is held for review at the end of that retainer; approve it to recheck and apply, or ignore it. Set the four bands in the Existing listings tab. Auto update uses the same bands and pauses at the same review before moving to the next retainer.");
         ImGui.BulletText("Start batch selling only: lists only the items in the Batch selling tab. It ignores other inventory, respects each item's per-listing size and optional per-run total, and caps each sale at 99 items before continuing the remainder.");
         ImGui.BulletText("Stop: stops further actions in the current run. Any price changes already submitted remain in place.");
 
@@ -350,12 +374,12 @@ internal sealed class MainWindow : Window
         ImGui.TextUnformatted("Tabs");
         ImGui.BulletText("New / selected item: shows the item sale window currently open in game. Check price again gets a suggestion; Apply price to selling window fills the price without confirming the sale. The automatic new-item option can price and confirm newly opened eligible sale windows.");
         ImGui.BulletText("Price lookup: search an item and retrieve its price without opening a retainer sale window. This is read-only and never changes a listing. In Captured items, Snapshot inventory or Snapshot retainer listings fills a list with Retrieve, List, and Exclude actions.");
-        ImGui.BulletText("Existing listings: review the results of Update existing listings. Use Exclude beside an item to add it to your exception list.");
+        ImGui.BulletText("Existing listings: set the four configurable price-drop review percentages for listings from 1–9,999 gil, 10,000–999,999 gil, 1,000,000–9,999,999 gil, and 10,000,000 gil or more. Both Update existing listings and Auto update use the percentage band selected by the listing's current price. Review scan results below and use Exclude beside an item to add it to your exception list.");
         ImGui.BulletText("Exceptions: items here are skipped by automatic listing and repricing. Refresh carried inventory to find items, filter by name, add a selected item, or add the current marketable inventory at once. Remove an item to allow it again.");
         ImGui.BulletText("Don't reprice: block price changes to existing listings through Update existing listings, Auto update, or the current-item price controls. Read-only lookups still work. These items can still be listed from your carried inventory; use Exceptions to skip both listing and repricing.");
         ImGui.BulletText("Batch selling: choose items and set the maximum quantity in each listing. The optional total limit caps how much of that item is listed in one batch-only run; 0 means no total cap. Add current inventory adds marketable carried items using the current size and limit.");
         ImGui.BulletText("Auto vendor: open an NPC vendor Shop window, set the price threshold, and start vendoring. Eligible carried stacks with a complete Universalis listing at or below the threshold are sold to the vendor; exclusions, unmarketable items, missing prices, and your own retainer listings are skipped. Verify every item before starting because vendor sales cannot be undone.");
-        ImGui.BulletText("Sniper: Start watching scans all marketable items in the selected world, Data Center, or region scope in batches of up to 100, spacing history queries at least one second apart, then listens for new listings across the same scope. Set a 3–14 day sale-history window and deal threshold. New 1-gil listings are flagged for manual review; the plugin never buys automatically.");
+        ImGui.BulletText("Sniper: Start watching scans all marketable items in the selected world, Data Center, or region scope in batches of up to 100, spacing history queries at least one second apart, then listens for new listings across the same scope. Set a 3–14 day sale-history window, deal threshold, minimum sales, and minimum listing value. Ordinary deals below the minimum value are hidden; 1-gil alerts always show. Click the Server header to group by server and the Listing header to sort prices high-to-low or low-to-high. Purchases are manual.");
         ImGui.BulletText("Settings: set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, and optionally compare across your Data Center or region. Data Center and region options cannot be used together.");
 
         ImGui.Separator();
@@ -422,6 +446,15 @@ internal sealed class MainWindow : Window
             config.Normalize();
             save();
         }
+        ImGui.SetNextItemWidth(150);
+        var minimumItemPrice = config.SniperMinimumItemPrice;
+        if (ImGui.InputInt("Minimum item value (gil each)", ref minimumItemPrice))
+        {
+            config.SniperMinimumItemPrice = minimumItemPrice;
+            config.Normalize();
+            save();
+        }
+        ImGui.TextDisabled("Ordinary deals below this price are hidden. 1-gil alerts always show.");
 
         ImGui.EndDisabled();
 
@@ -443,7 +476,7 @@ internal sealed class MainWindow : Window
             ImGui.PopStyleColor(3);
         }
         ImGui.TextWrapped(sniper.Status);
-        ImGui.TextDisabled($"Deals: listing ≤ {config.SniperThresholdFraction:P1} of the {config.SniperHistoryDays}-day HQ/NQ median, with at least {config.SniperMinimumSales14Days} sales in that window. Up to 1,800 recent sales are used per item. New 1-gil listings are highlighted; purchases are manual.");
+        ImGui.TextDisabled($"Deals: listing ≥ {config.SniperMinimumItemPrice:N0} gil each and ≤ {config.SniperThresholdFraction:P1} of the {config.SniperHistoryDays}-day HQ/NQ median, with at least {config.SniperMinimumSales14Days} sales in that window. Up to 1,800 recent sales are used per item. New 1-gil listings always show; purchases are manual.");
 
         var deals = sniper.Deals;
         ImGui.Separator();
@@ -453,25 +486,60 @@ internal sealed class MainWindow : Window
             ImGui.TextDisabled("No qualifying new listings received yet.");
             return;
         }
-        if (ImGui.BeginTable("##sniperDeals", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
-                ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable, new Vector2(0, Math.Max(140, ImGui.GetContentRegionAvail().Y - 25))))
+        if (ImGui.BeginTable("##sniperDeals", 7, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg |
+                ImGuiTableFlags.Sortable | ImGuiTableFlags.ScrollY | ImGuiTableFlags.Resizable,
+                new Vector2(0, Math.Max(140, ImGui.GetContentRegionAvail().Y - 25))))
         {
             ImGui.TableSetupColumn("Item");
+            ImGui.TableSetupColumn("Server");
             ImGui.TableSetupColumn("Quality", ImGuiTableColumnFlags.WidthFixed, 58);
-            ImGui.TableSetupColumn("Listing", ImGuiTableColumnFlags.WidthFixed, 82);
+            ImGui.TableSetupColumn("Listing", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.PreferSortDescending, 82);
             ImGui.TableSetupColumn($"{config.SniperHistoryDays}d median", ImGuiTableColumnFlags.WidthFixed, 88);
             ImGui.TableSetupColumn("Sales", ImGuiTableColumnFlags.WidthFixed, 52);
             ImGui.TableSetupColumn("Seen", ImGuiTableColumnFlags.WidthFixed, 68);
             ImGui.TableSetupScrollFreeze(0, 1);
             ImGui.TableHeadersRow();
-            foreach (var deal in deals)
+            var sortedDeals = deals.ToList();
+            var sortSpecs = ImGui.TableGetSortSpecs();
+            if (sortSpecs.SpecsCount > 0)
+            {
+                var sortSpec = sortSpecs.Specs[0];
+                var ascending = sortSpec.SortDirection == ImGuiSortDirection.Ascending;
+                sortedDeals = sortSpec.ColumnIndex switch
+                {
+                    0 => ascending
+                        ? sortedDeals.OrderBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList()
+                        : sortedDeals.OrderByDescending(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList(),
+                    1 => ascending
+                        ? sortedDeals.OrderBy(deal => deal.WorldName, StringComparer.OrdinalIgnoreCase).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList()
+                        : sortedDeals.OrderByDescending(deal => deal.WorldName, StringComparer.OrdinalIgnoreCase).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList(),
+                    2 => ascending
+                        ? sortedDeals.OrderBy(deal => deal.IsHq).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList()
+                        : sortedDeals.OrderByDescending(deal => deal.IsHq).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList(),
+                    3 => ascending
+                        ? sortedDeals.OrderBy(deal => deal.PricePerUnit).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList()
+                        : sortedDeals.OrderByDescending(deal => deal.PricePerUnit).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList(),
+                    4 => ascending
+                        ? sortedDeals.OrderBy(deal => deal.MedianSalePrice).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList()
+                        : sortedDeals.OrderByDescending(deal => deal.MedianSalePrice).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList(),
+                    5 => ascending
+                        ? sortedDeals.OrderBy(deal => deal.SalesInHistoryWindow).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList()
+                        : sortedDeals.OrderByDescending(deal => deal.SalesInHistoryWindow).ThenBy(deal => deal.ItemName, StringComparer.OrdinalIgnoreCase).ToList(),
+                    6 => ascending
+                        ? sortedDeals.OrderBy(deal => deal.DetectedAt).ToList()
+                        : sortedDeals.OrderByDescending(deal => deal.DetectedAt).ToList(),
+                    _ => sortedDeals
+                };
+            }
+            foreach (var deal in sortedDeals)
             {
                 ImGui.TableNextRow();
                 ImGui.TableNextColumn();
                 if (deal.IsOneGilAlert)
-                    ImGui.TextColored(new Vector4(1f, 0.35f, 0.25f, 1f), $"1 GIL ALERT · {deal.ItemName} · {deal.WorldName} · qty {deal.Quantity}");
+                    ImGui.TextColored(new Vector4(1f, 0.35f, 0.25f, 1f), $"1 GIL ALERT · {deal.ItemName} · qty {deal.Quantity}");
                 else
-                    ImGui.TextWrapped($"{deal.ItemName} · {deal.WorldName} · qty {deal.Quantity}");
+                    ImGui.TextWrapped($"{deal.ItemName} · qty {deal.Quantity}");
+                ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.WorldName);
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(deal.IsHq ? "HQ" : "NQ");
                 ImGui.TableNextColumn();
                 if (deal.IsOneGilAlert) ImGui.TextColored(new Vector4(1f, 0.35f, 0.25f, 1f), $"{deal.PricePerUnit:N0}");

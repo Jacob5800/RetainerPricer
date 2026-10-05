@@ -2,7 +2,7 @@
   "Author": "Jacob5800",
   "Name": "Retainer Pricer",
   "InternalName": "RetainerPricer",
-  "AssemblyVersion": "0.4.4.0",
+  "AssemblyVersion": "0.4.5.0",
   "Description": "Automatically price eligible inventory and reprice existing listings one gil below matching competition using Universalis market prices and recent sale history.",
   "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
   "ApplicableVersion": "any",
@@ -12,5 +12,5 @@
   "LoadSync": false,
   "CanUnloadAsync": true,
   "Punchline": "Automatically price new and existing retainer listings.",
-  "Changelog": "Adds Auto vendor for eligible carried stacks at a configurable Universalis price. Sniper now follows world, Data Center, or region scope settings, deduplicates 1-gil alerts, and defaults to a 91.0% median threshold. Start listing items refreshes inventory between sales and caps each listing at 99 items."
+  "Changelog": "Fixes Auto update when the retainer greeting dialogue must be advanced and listing stacks above 99. Adds editable price-drop review bands, a Sniper minimum listing value, sortable server and listing columns, and keeps 1-gil alerts visible."
 }

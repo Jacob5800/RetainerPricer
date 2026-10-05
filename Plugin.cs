@@ -33,13 +33,13 @@ public sealed class Plugin : IDalamudPlugin
     {
         (this.pluginInterface, this.commands, this.framework, this.log) = (pluginInterface, commands, framework, log);
         config = pluginInterface.GetPluginConfig() as PluginConfig ?? new PluginConfig();
-        var migrateConfig = config.Version < 7;
+        var migrateConfig = config.Version < 8;
         if (migrateConfig)
         {
             // Move users from the former 0.10 default while preserving any custom threshold.
             if (Math.Abs(config.SniperThresholdFraction - 0.10) < 0.000001)
                 config.SniperThresholdFraction = 0.910;
-            config.Version = 7;
+            config.Version = 8;
         }
         config.Normalize();
         if (migrateConfig) pluginInterface.SavePluginConfig(config);

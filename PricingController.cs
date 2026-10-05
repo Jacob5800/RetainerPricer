@@ -8,6 +8,7 @@ internal sealed class PriceRow(SellItem item)
     public string Status { get; set; } = "Waiting";
     public bool AwaitingPriceDropDecision { get; set; }
     public bool PriceDropApproved { get; set; }
+    public int PriceDropReviewThresholdPercent { get; set; }
 }
 
 internal sealed class PricingController : IDisposable
@@ -61,6 +62,7 @@ internal sealed class PricingController : IDisposable
     private ulong autoContentId;
     private uint autoWorldId;
     private ulong autoLastSelectedRetainerId;
+    private bool autoRetainerDialogueAdvanced;
 
     private sealed record ManualQuoteTarget(ItemChoice Item, bool IsHq, MarketWorld World);
 
@@ -451,6 +453,7 @@ internal sealed class PricingController : IDisposable
         }
 
         autoRetainerIndex = 0;
+        autoRetainerDialogueAdvanced = false;
         autoRetainersCompleted = autoUnavailableRetainers = autoEmptyRetainers = 0;
         autoUpdated = autoAlreadyPriced = autoSkipped = 0;
         workSource = PriceSource.Universalis;
@@ -566,6 +569,7 @@ internal sealed class PricingController : IDisposable
                     if (autoRetainerIndex >= autoRetainers.Count) FinishAutoUpdate();
                     return;
                 }
+                autoRetainerDialogueAdvanced = false;
                 step = Step.AutoWaitTargetMenu;
                 deadline = now.AddSeconds(10);
                 Status = $"Auto update · opening {target.Name}...";
@@ -578,6 +582,14 @@ internal sealed class PricingController : IDisposable
                     autoLastSelectedRetainerId != 0 &&
                     selectedId != autoLastSelectedRetainerId)
                 { Cancel("Auto update stopped because the game selected a different retainer than the queued one."); return; }
+                if (selectedId == expected.RetainerId && bridge.IsRetainerDialogueVisible && !autoRetainerDialogueAdvanced)
+                {
+                    if (!bridge.TryAdvanceRetainerDialogue(expected, out error))
+                    { Cancel($"Auto update stopped while advancing {expected.Name}'s retainer dialogue: {error}"); return; }
+                    autoRetainerDialogueAdvanced = true;
+                    Status = $"Auto update · opening {expected.Name}'s retainer menu...";
+                    return;
+                }
                 if (selectedId == expected.RetainerId && bridge.IsRetainerMenuVisible && !bridge.IsRetainerPickerVisible)
                 {
                     autoLastSelectedRetainerId = expected.RetainerId;
@@ -931,8 +943,11 @@ internal sealed class PricingController : IDisposable
                 if (now > deadline) Cancel("Automatic listing stopped because the next item sale window did not open in time. No item was skipped; check the retainer UI before retrying.");
                 return;
             }
+            // The game pre-fills its sale dialog at the per-listing cap for stacks larger than 99.
+            // Compare against that expected dialog quantity while retaining the full snapshot stack
+            // quantity for the remaining-inventory calculation after the listing is confirmed.
             if (listingCandidate is not { } expected || opened.IsExisting || opened.ItemId != expected.ItemId ||
-                opened.IsHq != expected.IsHq || opened.Quantity != expected.Quantity ||
+                opened.IsHq != expected.IsHq || opened.Quantity != Math.Min(expected.Quantity, 99) ||
                 opened.InventoryType != expected.InventoryType || opened.Slot != expected.Slot)
             { Cancel("Automatic listing stopped because the opened item differs from the inventory snapshot. No price was submitted."); return; }
 
@@ -1158,12 +1173,14 @@ internal sealed class PricingController : IDisposable
     {
         row.Snapshot = snapshot;
         row.Proposal = Calculate(snapshot, row.Item);
+        row.PriceDropReviewThresholdPercent = config.PriceDropReviewPercentFor(row.Item.CurrentPrice);
         if (!row.Proposal.CanApply) row.Status = row.Proposal.Error!;
         else if (row.Proposal.SuggestedPrice == row.Item.CurrentPrice) row.Status = "Already priced";
-        else if (!row.PriceDropApproved && (decimal)row.Proposal.SuggestedPrice * 2 < row.Item.CurrentPrice)
+        else if (!row.PriceDropApproved && (decimal)row.Proposal.SuggestedPrice * 100
+            < (decimal)row.Item.CurrentPrice * (100 - row.PriceDropReviewThresholdPercent))
         {
             row.AwaitingPriceDropDecision = true;
-            row.Status = "Held for review: target is more than 50% below the current price.";
+            row.Status = $"Held for review: target is more than {row.PriceDropReviewThresholdPercent}% below the current price.";
         }
         else row.Status = "Ready";
         step = Step.Closing;
