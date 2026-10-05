@@ -8,6 +8,7 @@ internal sealed class AutoVendorController : IDisposable
     private readonly UniversalisClient universalis;
     private readonly PluginConfig config;
     private readonly IReadOnlySet<uint> marketableItemIds;
+    private HashSet<uint> excludedItemIds = [];
     private CancellationTokenSource cancellation = new();
     private Task<PriceSnapshot>? priceTask;
     private IReadOnlyList<CarriedItemCandidate> candidates = [];
@@ -51,7 +52,10 @@ internal sealed class AutoVendorController : IDisposable
         if (!bridge.TryGetOwnRetainerIds(out ownRetainerIds))
         { Status = "Your retainer ownership data is not ready. Reopen the vendor window and retry; your own listings must be excluded."; return; }
 
-        candidates = bridge.ReadCarriedInventory(marketableItemIds, config.ExcludedItemIds.ToHashSet(),
+        if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out excludedItemIds, out _, out var protectionError))
+        { Status = protectionError; return; }
+
+        candidates = bridge.ReadCarriedInventory(marketableItemIds, excludedItemIds,
             out var excluded, out var unmarketable, out var inventoryError);
         if (inventoryError.Length != 0)
         { Status = inventoryError; candidates = []; return; }
@@ -108,11 +112,20 @@ internal sealed class AutoVendorController : IDisposable
         if (!bridge.IsVendorShopOpen)
         { Cancel("Auto vendor stopped because the vendor Shop window closed."); return; }
 
-        var planned = candidates[index];
-        if (!marketableItemIds.Contains(planned.ItemId) || config.ExcludedItemIds.Contains(planned.ItemId))
-        { Skip($"Skipped {planned.Name}: it is excluded or no longer marketable."); return; }
+        if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out excludedItemIds, out var savedGearsetItemIds, out var protectionError))
+        { Cancel(protectionError); return; }
 
-        var inventory = bridge.ReadCarriedInventory(marketableItemIds, config.ExcludedItemIds.ToHashSet(),
+        var planned = candidates[index];
+        if (!marketableItemIds.Contains(planned.ItemId) || excludedItemIds.Contains(planned.ItemId))
+        {
+            var reason = excludedItemIds.Contains(planned.ItemId)
+                ? ItemProtection.Reason(planned.ItemId, config, savedGearsetItemIds)
+                : "the item is no longer marketable";
+            Skip($"Skipped {planned.Name}: {reason}");
+            return;
+        }
+
+        var inventory = bridge.ReadCarriedInventory(marketableItemIds, excludedItemIds,
             out _, out _, out var inventoryError);
         if (inventoryError.Length != 0)
         { Cancel($"Auto vendor stopped because inventory could not be refreshed: {inventoryError}"); return; }
@@ -169,6 +182,13 @@ internal sealed class AutoVendorController : IDisposable
         { Cancel("Auto vendor stopped because the active item was lost."); return; }
         if (!bridge.IsVendorShopOpen)
         { Cancel("Auto vendor stopped because the vendor Shop window closed."); return; }
+        if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out excludedItemIds, out var savedGearsetItemIds, out var protectionError))
+        { Cancel(protectionError); return; }
+        if (excludedItemIds.Contains(item.ItemId))
+        {
+            Skip($"Kept {item.Name}: {ItemProtection.Reason(item.ItemId, config, savedGearsetItemIds)}");
+            return;
+        }
         if (bridge.IsVendorContextMenuOpen)
         {
             if (!bridge.TryDismissVendorItemContextMenu(out var closeError))

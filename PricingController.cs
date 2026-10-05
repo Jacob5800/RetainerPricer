@@ -173,7 +173,7 @@ internal sealed class PricingController : IDisposable
                 seenDialog = item.DialogGeneration;
                 CurrentSnapshot = null;
                 CurrentProposal = null;
-                if (config.AutoPriceNewListings && !item.IsExisting && marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId))
+                if (config.AutoPriceNewListings && !item.IsExisting && marketableItemIds.Contains(item.ItemId))
                     CheckCurrent(true);
             }
             return;
@@ -203,9 +203,16 @@ internal sealed class PricingController : IDisposable
 
     public void SnapshotInventory()
     {
-        var items = bridge.ReadCarriedInventory(marketableItemIds, config.ExcludedItemIds.ToHashSet(),
-            out var exceptionSkipped, out var unmarketableSkipped, out var error);
         InventoryCandidates.Clear();
+        InventorySnapshotAt = null;
+        if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out var excludedItemIds, out _, out var protectionError))
+        {
+            InventorySnapshotError = protectionError;
+            Status = protectionError;
+            return;
+        }
+        var items = bridge.ReadCarriedInventory(marketableItemIds, excludedItemIds,
+            out var exceptionSkipped, out var unmarketableSkipped, out var error);
         InventoryCandidates.AddRange(items);
         InventoryExceptionSkipped = exceptionSkipped;
         InventoryUnmarketableSkipped = unmarketableSkipped;
@@ -225,12 +232,20 @@ internal sealed class PricingController : IDisposable
             Status = sessionError;
             return;
         }
+        if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out var excludedItemIds, out _, out var protectionError))
+        {
+            ListedCandidates.Clear();
+            ListedSnapshotAt = null;
+            ListedSnapshotError = protectionError;
+            Status = protectionError;
+            return;
+        }
         var items = bridge.ReadExistingListings(out var error);
         ListedCandidates.Clear();
-        ListedExceptionSkipped = items.Count(item => config.ExcludedItemIds.Contains(item.ItemId));
+        ListedExceptionSkipped = items.Count(item => excludedItemIds.Contains(item.ItemId));
         ListedUnmarketableSkipped = items.Count(item => !marketableItemIds.Contains(item.ItemId));
         if (error.Length == 0)
-            ListedCandidates.AddRange(items.Where(item => marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId)));
+            ListedCandidates.AddRange(items.Where(item => marketableItemIds.Contains(item.ItemId) && !excludedItemIds.Contains(item.ItemId)));
         ListedSnapshotError = error.Length == 0 ? null : error;
         ListedSnapshotAt = error.Length == 0 ? DateTimeOffset.Now : null;
         Status = error.Length != 0 ? error :
@@ -323,7 +338,10 @@ internal sealed class PricingController : IDisposable
         if (!bridge.TryReadSellItem(out var target, out var error)) { Status = error; return; }
         if (!marketableItemIds.Contains(target.ItemId))
         { Status = "This item is not marketable and will be skipped."; return; }
-        if (IsExcluded(target.ItemId)) { Status = $"{target.Name} is in the item exception list and will be skipped."; return; }
+        if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out var excludedItemIds, out var savedGearsetItemIds, out var protectionError))
+        { Status = protectionError; return; }
+        if (excludedItemIds.Contains(target.ItemId))
+        { Status = $"{target.Name}: {ItemProtection.Reason(target.ItemId, config, savedGearsetItemIds)}"; return; }
         if (target.IsExisting && IsNoReprice(target.ItemId))
         { CurrentSnapshot = null; CurrentProposal = null; Status = $"{target.Name} is protected by Don't reprice. The plugin will not change its existing price."; return; }
         if (fillAutomatically)
@@ -472,16 +490,17 @@ internal sealed class PricingController : IDisposable
         index = 0;
         workingItem = null;
         total = excluded = protectedCount = unmarketable = 0;
+        if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out var excludedItemIds, out _, out error)) return false;
         var listings = bridge.ReadExistingListings(out error);
         if (error.Length != 0) return false;
         if (listings.Any(item => item.Session.RetainerId != active.RetainerId || item.Session.ContentId != active.ContentId))
         { error = "The retainer changed while its listings were being read."; return false; }
 
         total = listings.Count;
-        excluded = listings.Count(item => IsExcluded(item.ItemId));
-        protectedCount = listings.Count(item => !IsExcluded(item.ItemId) && IsNoReprice(item.ItemId));
-        unmarketable = listings.Count(item => !IsExcluded(item.ItemId) && !IsNoReprice(item.ItemId) && !marketableItemIds.Contains(item.ItemId));
-        Rows.AddRange(listings.Where(item => marketableItemIds.Contains(item.ItemId) && !IsExcluded(item.ItemId) && !IsNoReprice(item.ItemId))
+        excluded = listings.Count(item => excludedItemIds.Contains(item.ItemId));
+        protectedCount = listings.Count(item => !excludedItemIds.Contains(item.ItemId) && IsNoReprice(item.ItemId));
+        unmarketable = listings.Count(item => !excludedItemIds.Contains(item.ItemId) && !IsNoReprice(item.ItemId) && !marketableItemIds.Contains(item.ItemId));
+        Rows.AddRange(listings.Where(item => marketableItemIds.Contains(item.ItemId) && !excludedItemIds.Contains(item.ItemId) && !IsNoReprice(item.ItemId))
             .Select(item => new PriceRow(item)));
         session = active;
         step = Step.Start;
@@ -814,6 +833,15 @@ internal sealed class PricingController : IDisposable
         var row = Rows[index];
         if (step == Step.Start)
         {
+            if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out var currentExcludedItemIds, out var currentSavedGearsetItemIds, out var protectionError))
+            { Cancel(protectionError); return; }
+            if (currentExcludedItemIds.Contains(row.Item.ItemId))
+            {
+                row.Status = ItemProtection.Reason(row.Item.ItemId, config, currentSavedGearsetItemIds);
+                AdvanceScanIndex(row);
+                ResetRequest();
+                return;
+            }
             ResetRequest();
             if (!bridge.TryOpenExisting(row.Item, out var openError)) { ScanFailed(row, openError); return; }
             deadline = now.AddSeconds(8);
@@ -836,6 +864,22 @@ internal sealed class PricingController : IDisposable
         }
         if (step == Step.Closing)
         {
+            if (workingItem is not null)
+            {
+                if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out var currentExcludedItemIds, out var currentSavedGearsetItemIds, out var protectionError))
+                { Cancel(protectionError); return; }
+                if (currentExcludedItemIds.Contains(workingItem.ItemId))
+                {
+                    if (!bridge.TryClosePriceWindows(workingItem, out var excludedCloseError))
+                    { Cancel($"Could not close the price window for {row.Item.Name}: {excludedCloseError}"); return; }
+                    row.Status = ItemProtection.Reason(workingItem.ItemId, config, currentSavedGearsetItemIds);
+                    AdvanceScanIndex(row);
+                    step = Step.Start;
+                    workingItem = null;
+                    ResetRequest();
+                    return;
+                }
+            }
             if (workingItem is not null && !row.AwaitingPriceDropDecision && row.Proposal is { CanApply: true } proposal
                 && proposal.SuggestedPrice != workingItem.CurrentPrice)
             {
@@ -903,13 +947,21 @@ internal sealed class PricingController : IDisposable
             }
 
             var candidate = batchCandidates[index];
-            if (!marketableItemIds.Contains(candidate.ItemId) || IsExcluded(candidate.ItemId))
-            { SkipBatchItem("Skipped an item that is now excluded or not marketable."); return; }
+            if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out var currentExcludedItemIds, out var currentSavedGearsetItemIds, out var protectionError))
+            { Cancel(protectionError); return; }
+            if (!marketableItemIds.Contains(candidate.ItemId) || currentExcludedItemIds.Contains(candidate.ItemId))
+            {
+                var reason = currentExcludedItemIds.Contains(candidate.ItemId)
+                    ? ItemProtection.Reason(candidate.ItemId, config, currentSavedGearsetItemIds)
+                    : "The item is not marketable.";
+                SkipBatchItem($"Skipped {candidate.Name}: {reason}");
+                return;
+            }
 
             // Listing one stack can leave inventory slots compacted or otherwise shifted by the game.
             // Resolve the next planned item against current inventory before opening it, while still
             // validating the exact item/quality/quantity again in the sale window below.
-            var currentInventory = bridge.ReadCarriedInventory(marketableItemIds, config.ExcludedItemIds.ToHashSet(),
+            var currentInventory = bridge.ReadCarriedInventory(marketableItemIds, currentExcludedItemIds,
                 out _, out _, out var inventoryRefreshError);
             if (inventoryRefreshError.Length != 0)
             { Cancel($"Automatic listing stopped because carried inventory could not be refreshed: {inventoryRefreshError}"); return; }
@@ -1098,7 +1150,9 @@ internal sealed class PricingController : IDisposable
                 var remaining = expected.Quantity - submitted.Quantity;
                 if (remaining > 0)
                 {
-                    var currentInventory = bridge.ReadCarriedInventory(marketableItemIds, config.ExcludedItemIds.ToHashSet(),
+                    if (!ItemProtection.TryGetExcludedItemIds(bridge, config, out var currentExcludedItemIds, out _, out var protectionError))
+                    { Cancel($"The listing was confirmed, but {protectionError}"); return; }
+                    var currentInventory = bridge.ReadCarriedInventory(marketableItemIds, currentExcludedItemIds,
                         out _, out _, out var inventoryError);
                     var remainingStack = inventoryError.Length == 0
                         ? currentInventory.FirstOrDefault(item => item.ItemId == expected.ItemId && item.IsHq == expected.IsHq)
@@ -1258,8 +1312,6 @@ internal sealed class PricingController : IDisposable
         => PriceCalculator.Calculate(snapshot, itemId, worldId, isHq, ownRetainerIds, (uint)config.MinimumPrice,
             DateTimeOffset.UtcNow, config.UseMaximumPriceAge ? TimeSpan.FromMinutes(config.MaximumAgeMinutes) : null,
             dataCenterName);
-
-    private bool IsExcluded(uint itemId) => config.ExcludedItemIds.Contains(itemId);
 
     private bool IsNoReprice(uint itemId) => config.NoRepriceItemIds.Contains(itemId);
 

@@ -8,6 +8,7 @@ using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.FFXIV.Client.UI.Info;
+using FFXIVClientStructs.FFXIV.Client.UI.Misc;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using Lumina.Excel.Sheets;
 using System.Runtime.InteropServices;
@@ -321,6 +322,36 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         }
         error = string.Empty;
         return result;
+    }
+
+    public bool TryReadSavedGearsetItemIds(out IReadOnlySet<uint> itemIds, out string error)
+    {
+        itemIds = new HashSet<uint>();
+        error = "Saved gear-set data is not ready. Wait for your character to finish loading, then retry.";
+        if (disposed || !player.IsLoaded || player.ContentId == 0) return false;
+
+        var module = RaptureGearsetModule.Instance();
+        if (module == null) return false;
+
+        var protectedIds = new HashSet<uint>();
+        var entries = module->Entries;
+        for (var gearsetIndex = 0; gearsetIndex < 100; gearsetIndex++)
+        {
+            ref var gearset = ref entries[gearsetIndex];
+            if ((gearset.Flags & RaptureGearsetModule.GearsetFlag.Exists) == RaptureGearsetModule.GearsetFlag.None)
+                continue;
+
+            var items = gearset.Items;
+            for (var slot = 0; slot < 14; slot++)
+            {
+                var itemId = items[slot].ItemId;
+                if (itemId != 0) protectedIds.Add(itemId);
+            }
+        }
+
+        itemIds = protectedIds;
+        error = string.Empty;
+        return true;
     }
 
     public IReadOnlyList<CarriedItemCandidate> ReadCarriedInventory(IReadOnlySet<uint> marketableItemIds,
