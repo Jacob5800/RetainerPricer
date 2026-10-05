@@ -1,18 +1,32 @@
 # TODO
 
+## v0.4.7 — Retainer greeting, vendor action, and Sniper wording
+
+Implemented:
+
+- Auto update advances the greeting after selecting a retainer even while the game's selected-retainer ID is temporarily unset or still reports the previously selected retainer. It retries while the greeting remains open, while rejecting any other resolved retainer ID.
+- Auto vendor uses the game's vendor sale action for a revalidated inventory slot, then confirms the expected stack was removed before continuing.
+- Sniper shows the deal threshold as a percentage of median (91.0% default) instead of a decimal multiplier.
+- Updated the `?` help, README, plugin manifest, and changelog for the new behavior.
+
+Pending in-game observation:
+
+- Confirm Auto update advances the “I have come, Master” greeting and continues into the retainer options and listing screens.
+- Confirm Auto vendor sells a qualifying stack and proceeds to the next candidate after inventory verification.
+
 ## v0.4.6 — Inventory binding and vendor menu handling
 
 Implemented:
 
 - Automatically omit spiritbound equipment from market-listing inventory snapshots and recheck binding before opening or repricing a sale window.
-- Correct vendor context-menu selection to use the visible row index, and safely close an already-open item menu owned by the active vendor before continuing.
+- Safely close an already-open item menu owned by the active vendor before continuing.
 - Add `/retainer` as an alternate command for opening the plugin.
 - Update the `?` help, README, plugin manifest, and changelog for the new behavior.
 
 Pending in-game observation:
 
 - Confirm spiritbound gear is omitted from automatic listing while unbound copies remain eligible.
-- Confirm Auto vendor selects Sell for a qualifying carried stack, completes the quantity and confirmation steps, then continues to the next item.
+- Confirm Auto vendor safely handles a vendor-owned context menu before continuing.
 - Confirm `/retainer` opens the plugin without conflicting with another installed command.
 
 ## v0.4.3 — Sniper batch pacing and large-drop review

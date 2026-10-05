@@ -62,7 +62,8 @@ internal sealed class PricingController : IDisposable
     private ulong autoContentId;
     private uint autoWorldId;
     private ulong autoLastSelectedRetainerId;
-    private bool autoRetainerDialogueAdvanced;
+    private int autoRetainerDialogueClicks;
+    private DateTimeOffset autoRetainerNextDialogueClick;
 
     private sealed record ManualQuoteTarget(ItemChoice Item, bool IsHq, MarketWorld World);
 
@@ -453,7 +454,8 @@ internal sealed class PricingController : IDisposable
         }
 
         autoRetainerIndex = 0;
-        autoRetainerDialogueAdvanced = false;
+        autoRetainerDialogueClicks = 0;
+        autoRetainerNextDialogueClick = DateTimeOffset.MinValue;
         autoRetainersCompleted = autoUnavailableRetainers = autoEmptyRetainers = 0;
         autoUpdated = autoAlreadyPriced = autoSkipped = 0;
         workSource = PriceSource.Universalis;
@@ -569,7 +571,8 @@ internal sealed class PricingController : IDisposable
                     if (autoRetainerIndex >= autoRetainers.Count) FinishAutoUpdate();
                     return;
                 }
-                autoRetainerDialogueAdvanced = false;
+                autoRetainerDialogueClicks = 0;
+                autoRetainerNextDialogueClick = DateTimeOffset.MinValue;
                 step = Step.AutoWaitTargetMenu;
                 deadline = now.AddSeconds(10);
                 Status = $"Auto update · opening {target.Name}...";
@@ -582,18 +585,24 @@ internal sealed class PricingController : IDisposable
                     autoLastSelectedRetainerId != 0 &&
                     selectedId != autoLastSelectedRetainerId)
                 { Cancel("Auto update stopped because the game selected a different retainer than the queued one."); return; }
-                if (selectedId == expected.RetainerId && bridge.IsRetainerDialogueVisible && !autoRetainerDialogueAdvanced)
-                {
-                    if (!bridge.TryAdvanceRetainerDialogue(expected, out error))
-                    { Cancel($"Auto update stopped while advancing {expected.Name}'s retainer dialogue: {error}"); return; }
-                    autoRetainerDialogueAdvanced = true;
-                    Status = $"Auto update · opening {expected.Name}'s retainer menu...";
-                    return;
-                }
                 if (selectedId == expected.RetainerId && bridge.IsRetainerMenuVisible && !bridge.IsRetainerPickerVisible)
                 {
                     autoLastSelectedRetainerId = expected.RetainerId;
                     step = Step.AutoSelectSellMenu;
+                    return;
+                }
+                if (bridge.IsRetainerDialogueVisible && !bridge.IsRetainerPickerVisible)
+                {
+                    if (autoRetainerDialogueClicks < 4 && now >= autoRetainerNextDialogueClick)
+                    {
+                        if (!bridge.TryAdvanceRetainerDialogue(expected, autoLastSelectedRetainerId, out error))
+                        { Cancel($"Auto update stopped while advancing {expected.Name}'s retainer dialogue: {error}"); return; }
+                        autoRetainerDialogueClicks++;
+                        autoRetainerNextDialogueClick = now.AddMilliseconds(500);
+                        Status = $"Auto update · confirming {expected.Name}'s greeting ({autoRetainerDialogueClicks}/4)...";
+                    }
+                    else if (autoRetainerDialogueClicks >= 4 && now > deadline)
+                        Cancel($"Auto update stopped because {expected.Name}'s greeting did not advance to the retainer menu.");
                     return;
                 }
                 if (now > deadline) Cancel($"Auto update stopped because {expected.Name}'s retainer menu did not appear.");

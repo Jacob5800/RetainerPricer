@@ -2,7 +2,7 @@ namespace RetainerPricer;
 
 internal sealed class AutoVendorController : IDisposable
 {
-    private enum Step { Idle, Begin, Price, OpenSellContext, ContextMenu, SalePrompt, Confirm, Verify }
+    private enum Step { Idle, Begin, Price, Sell, Verify }
 
     private readonly NativeMarketBridge bridge;
     private readonly UniversalisClient universalis;
@@ -46,6 +46,8 @@ internal sealed class AutoVendorController : IDisposable
         { Status = "Log in to start Auto vendor."; return; }
         if (!bridge.IsVendorShopOpen)
         { Status = "Open an NPC vendor's Shop window before starting Auto vendor."; return; }
+        if (bridge.VendorSaleAvailabilityError is { Length: > 0 } vendorSaleError)
+        { Status = vendorSaleError; return; }
         if (!bridge.TryGetOwnRetainerIds(out ownRetainerIds))
         { Status = "Your retainer ownership data is not ready. Reopen the vendor window and retry; your own listings must be excluded."; return; }
 
@@ -80,17 +82,8 @@ internal sealed class AutoVendorController : IDisposable
                 case Step.Price:
                     CheckPrice();
                     break;
-                case Step.OpenSellContext:
-                    OpenSellContext();
-                    break;
-                case Step.ContextMenu:
-                    WaitForContextMenu();
-                    break;
-                case Step.SalePrompt:
-                    WaitForSalePrompt();
-                    break;
-                case Step.Confirm:
-                    WaitForConfirmation();
+                case Step.Sell:
+                    SellCurrentItem();
                     break;
                 case Step.Verify:
                     VerifySale();
@@ -166,103 +159,30 @@ internal sealed class AutoVendorController : IDisposable
         targetReduction = item.Quantity;
         if (quantityBefore < targetReduction)
         { Cancel($"Auto vendor stopped because the carried quantity for {item.Name} changed unexpectedly."); return; }
-        step = Step.OpenSellContext;
-        Status = $"{item.Name} is listed at {lowest.Value:N0} gil · preparing its vendor Sell action…";
+        step = Step.Sell;
+        Status = $"{item.Name} is listed at {lowest.Value:N0} gil · preparing its vendor sale…";
     }
 
-    private void OpenSellContext()
+    private void SellCurrentItem()
     {
         if (candidate is not { } item)
         { Cancel("Auto vendor stopped because the active item was lost."); return; }
-        if (bridge.IsVendorQuantityPromptOpen || bridge.IsVendorConfirmationOpen)
-        { Cancel($"Auto vendor stopped before selling {item.Name}: resolve the open vendor prompt first."); return; }
+        if (!bridge.IsVendorShopOpen)
+        { Cancel("Auto vendor stopped because the vendor Shop window closed."); return; }
         if (bridge.IsVendorContextMenuOpen)
         {
             if (!bridge.TryDismissVendorItemContextMenu(out var closeError))
             { Cancel($"Auto vendor stopped before selling {item.Name}: {closeError}"); return; }
-            Status = $"Closed the already-open vendor item menu. Continuing with {item.Name}…";
+            Status = $"Closed the open vendor item menu. Continuing with {item.Name}…";
             return;
         }
-        if (!bridge.TryOpenVendorSellContext(item, out var openError))
-        { Cancel($"Auto vendor stopped before selling {item.Name}: {openError}"); return; }
-        deadline = DateTimeOffset.UtcNow.AddSeconds(8);
-        step = Step.ContextMenu;
-        Status = $"Opening the vendor Sell action for {item.Name}…";
-    }
-
-    private void WaitForContextMenu()
-    {
-        if (candidate is not { } item) { Cancel("Auto vendor stopped because the active item was lost."); return; }
-        if (bridge.IsVendorContextMenuOpen)
-        {
-            if (!bridge.TrySelectVendorSell(item, out var selectError))
-            { Cancel($"Auto vendor stopped before selling {item.Name}: {selectError}"); return; }
-            deadline = DateTimeOffset.UtcNow.AddSeconds(8);
-            step = Step.SalePrompt;
-            Status = $"Selected Sell for {item.Name}; waiting for the game's quantity or confirmation prompt…";
-            return;
-        }
-        if (DateTimeOffset.UtcNow > deadline)
-            Cancel($"Auto vendor stopped because the vendor Sell menu did not open for {item.Name}.");
-    }
-
-    private void WaitForSalePrompt()
-    {
-        if (candidate is not { } item) { Cancel("Auto vendor stopped because the active item was lost."); return; }
-        if (bridge.IsVendorQuantityPromptOpen)
-        {
-            if (!bridge.TrySetVendorSaleQuantity(item, out var quantityError))
-            { Cancel($"Auto vendor left {item.Name} unsold: {quantityError}"); return; }
-            deadline = DateTimeOffset.UtcNow.AddSeconds(8);
-            step = Step.Confirm;
-            Status = $"Set the vendor quantity to the full {item.Quantity:N0}-item stack of {item.Name}; waiting for confirmation…";
-            return;
-        }
-        if (bridge.IsVendorConfirmationOpen)
-        {
-            ConfirmSale(item);
-            return;
-        }
-        if (!bridge.TryGetCarriedItemTotal(item.ItemId, item.IsHq, out var current, out var inventoryError))
-        {
-            if (DateTimeOffset.UtcNow > deadline) Cancel($"Auto vendor could not verify whether {item.Name} was sold: {inventoryError}");
-            return;
-        }
-        if (current < quantityBefore)
-        {
-            step = Step.Verify;
-            deadline = DateTimeOffset.UtcNow.AddSeconds(8);
-            return;
-        }
-        if (DateTimeOffset.UtcNow > deadline)
-            Cancel($"Auto vendor stopped because no sale prompt appeared for {item.Name}. No next item was attempted.");
-    }
-
-    private void WaitForConfirmation()
-    {
-        if (candidate is not { } item) { Cancel("Auto vendor stopped because the active item was lost."); return; }
-        if (bridge.IsVendorConfirmationOpen)
-        {
-            ConfirmSale(item);
-            return;
-        }
-        if (bridge.TryGetCarriedItemTotal(item.ItemId, item.IsHq, out var current, out _) && current < quantityBefore)
-        {
-            step = Step.Verify;
-            deadline = DateTimeOffset.UtcNow.AddSeconds(8);
-            return;
-        }
-        if (DateTimeOffset.UtcNow > deadline)
-            Cancel($"Auto vendor stopped because the sale confirmation for {item.Name} did not appear. No next item was attempted.");
-    }
-
-    private void ConfirmSale(CarriedItemCandidate item)
-    {
-        if (!bridge.TryConfirmVendorSale(item, out var confirmError))
-        { Cancel($"Auto vendor left {item.Name} unconfirmed: {confirmError}"); return; }
+        if (bridge.IsVendorQuantityPromptOpen || bridge.IsVendorConfirmationOpen)
+        { Cancel($"Auto vendor stopped before selling {item.Name}: close the open vendor prompt first."); return; }
+        if (!bridge.TrySellInventoryItemToVendor(item, out var sellError))
+        { Cancel($"Auto vendor stopped before selling {item.Name}: {sellError}"); return; }
         deadline = DateTimeOffset.UtcNow.AddSeconds(10);
         step = Step.Verify;
-        Status = $"Confirmed the vendor sale for {item.Name}; verifying inventory before continuing…";
+        Status = $"Sent the vendor sale action for {item.Name} × {item.Quantity:N0}; verifying inventory before continuing…";
     }
 
     private void VerifySale()
@@ -310,7 +230,6 @@ internal sealed class AutoVendorController : IDisposable
 
     public void Cancel(string message = "Auto vendor stopped. Check any open vendor prompt before continuing.")
     {
-        if (candidate is { } item) bridge.TryCancelVendorPrompt(item);
         try { cancellation.Cancel(); }
         catch (ObjectDisposedException) { }
         step = Step.Idle;
