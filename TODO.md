@@ -6,6 +6,7 @@ Implemented:
 
 - Added an Auto vendor-only list with item search, add/remove controls, and Add current inventory. Listed items bypass market-price lookups and the threshold, while Exceptions, saved gear-set protection, and marketability/binding checks still take priority.
 - Added an optional, off-by-default Dalamud server info bar button. Clicking **RP** opens the Retainer Pricer window.
+- Added a Discord invite button beside **Send feedback** at the bottom of the `?` tab.
 - Updated the in-plugin `?` help and README for both features.
 
 Pending in-game observation:
@@ -13,6 +14,7 @@ Pending in-game observation:
 - Confirm an Auto vendor-list item bypasses the price lookup and is sold, while items in Exceptions or saved gear sets remain protected.
 - Confirm **Add current inventory** populates the Auto vendor-only list and individual remove controls update it.
 - Enable the server info bar option, click **RP** beside the world/time display, and confirm the plugin window opens; disable the option and confirm the button disappears.
+- Click the Discord button in the `?` tab and confirm it opens the invite link in the default browser.
 
 ## v0.4.8 — Saved gear-set protection
 

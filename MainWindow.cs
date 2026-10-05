@@ -1,6 +1,9 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
+using Dalamud.Interface.Components;
 using Dalamud.Interface.Windowing;
+using Dalamud.Utility;
 
 namespace RetainerPricer;
 
@@ -8,6 +11,7 @@ internal sealed class MainWindow : Window
 {
     private const string EmptyBatchListPopup = "Batch selling list is empty.";
     private const string PriceDropReviewPopup = "Review large price drop";
+    private const string DiscordInviteUrl = "https://discord.gg/TTPZ82xaUd";
     private readonly PluginConfig config;
     private readonly PricingController controller;
     private readonly IReadOnlyList<ItemChoice> itemChoices;
@@ -410,13 +414,24 @@ internal sealed class MainWindow : Window
         ImGui.TextWrapped("Describe what happened, what you expected, and which button or tab you used. Please do not include passwords or account details.");
         ImGui.InputTextMultiline("##feedbackMessage", ref feedbackMessage, 4001, new Vector2(0, 120));
         ImGui.TextDisabled($"{feedbackMessage.Length}/4000 characters · your note and plugin version are emailed to the developer; no character or market data is attached.");
+        var feedbackButtonLabel = feedbackSending ? "Sending feedback..." : "Send feedback";
+        var feedbackButtonWidth = ImGui.CalcTextSize(feedbackButtonLabel).X + ImGui.GetStyle().FramePadding.X * 2;
+        const string discordButtonLabel = "Discord";
+        var discordButtonWidth = ImGuiComponents.GetIconButtonWithTextWidth(FontAwesomeIcon.Gamepad, discordButtonLabel);
+        var buttonSpacing = ImGui.GetStyle().ItemSpacing.X;
+        var buttonRowWidth = feedbackButtonWidth + buttonSpacing + discordButtonWidth;
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + Math.Max(0, ImGui.GetContentRegionAvail().X - buttonRowWidth));
+
         ImGui.BeginDisabled(!feedback.IsConfigured || feedbackSending || string.IsNullOrWhiteSpace(feedbackMessage) || feedbackMessage.Trim().Length > 4000);
-        if (ImGui.Button(feedbackSending ? "Sending feedback..." : "Send feedback")) StartFeedbackSend();
+        if (ImGui.Button(feedbackButtonLabel)) StartFeedbackSend();
         ImGui.EndDisabled();
+        ImGui.SameLine();
+        if (ImGuiComponents.IconButtonWithText(FontAwesomeIcon.Gamepad, discordButtonLabel))
+            Util.OpenLink(DiscordInviteUrl);
         if (!feedback.IsConfigured)
-            ImGui.SameLine();
-        if (!feedback.IsConfigured)
+        {
             ImGui.TextDisabled("Feedback email setup is not finished yet.");
+        }
         if (feedbackStatus is { Length: > 0 } status) ImGui.TextWrapped(status);
         ImGui.EndChild();
     }
