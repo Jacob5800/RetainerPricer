@@ -3,18 +3,18 @@
     "Author": "Jacob5800",
     "Name": "Retainer Pricer",
     "InternalName": "RetainerPricer",
-    "AssemblyVersion": "0.4.4.0",
+    "AssemblyVersion": "0.4.6.0",
     "TestingAssemblyVersion": null,
     "RepoUrl": "https://github.com/Jacob5800/RetainerPricer",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
     "Punchline": "Automatically price new and existing retainer listings.",
     "Description": "Automatically price eligible inventory and reprice existing listings one gil below matching competition using Universalis market prices and recent sale history.",
-    "Changelog": "Adds Auto vendor for eligible carried stacks at a configurable Universalis price. Sniper now follows world, Data Center, or region scope settings, deduplicates 1-gil alerts, and defaults to a 91.0% median threshold. Start listing items refreshes inventory between sales and caps each listing at 99 items.",
+    "Changelog": "Skips spiritbound gear during automatic market listings, fixes Auto vendor menu selection and continues past an already-open shop item menu, and adds /retainer as a shortcut. Also includes safer Auto update dialogue handling, support for stacks above 99, editable price-drop review bands, and Sniper value filtering with sortable server/listing columns.",
     "IsHide": false,
     "IsTestingExclusive": false,
     "DownloadLinkInstall": "https://github.com/Jacob5800/RetainerPricer/releases/latest/download/latest.zip",
     "DownloadLinkUpdate": "https://github.com/Jacob5800/RetainerPricer/releases/latest/download/latest.zip",
-    "LastUpdate": "1791158065"
+    "LastUpdate": "1791162545"
   }
 ]
