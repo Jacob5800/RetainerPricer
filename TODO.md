@@ -1,5 +1,16 @@
 # TODO
 
+## v0.4.8 — Saved gear-set protection
+
+Implemented:
+
+- Automatically protect items used by saved gear sets from automatic listing, existing-listing repricing, Auto update, and Auto vendor. The protection refreshes from the current character's saved gear sets; automation pauses if that data is unavailable.
+- Updated the `?` help, README, plugin manifest, and release changelog.
+
+Pending in-game observation:
+
+- Verify a saved gear-set item is skipped by automatic listing, repricing, Auto update, and Auto vendor, and becomes eligible after removing it from all gear sets unless it remains in Exceptions.
+
 ## v0.4.7 — Retainer greeting, vendor action, and Sniper wording
 
 Implemented:
