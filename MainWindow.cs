@@ -361,11 +361,12 @@ internal sealed class MainWindow : Window
             return;
         }
         ImGui.TextWrapped("Quick guide: set your exclusions and optional batch sizes once, open a retainer's selling list, then choose the action you need.");
+        ImGui.TextDisabled("Open this window with /retainerpricer or /retainer.");
         ImGui.Separator();
 
         ImGui.TextUnformatted("Top buttons");
         ImGui.BulletText("Auto update: start from the retainer picker to visit retainers top-to-bottom, or start from any retainer's selling list to process that one first. It visits each retainer once, advances the greeting dialogue to reach its menu, and skips unavailable retainers. Stop halts the run; already submitted changes remain applied.");
-        ImGui.BulletText("Start listing items: checks eligible items in your carried inventory and lists them one by one. No sale exceeds 99 items; larger stacks continue in follow-up listings. Exclusions, untradeable items, and items the market does not support are skipped. The run stops when it finishes or the retainer's 20 listing slots are full.");
+        ImGui.BulletText("Start listing items: checks eligible items in your carried inventory and lists them one by one. No sale exceeds 99 items; larger stacks continue in follow-up listings. Exclusions, bound items, untradeable items, and items the market does not support are skipped. The run stops when it finishes or the retainer's 20 listing slots are full.");
         ImGui.BulletText("Update existing listings: reprices eligible listings on the currently open retainer. A proposed price drop above the configurable percentage for its current-price band is held for review at the end of that retainer; approve it to recheck and apply, or ignore it. Set the four bands in the Existing listings tab. Auto update uses the same bands and pauses at the same review before moving to the next retainer.");
         ImGui.BulletText("Start batch selling only: lists only the items in the Batch selling tab. It ignores other inventory, respects each item's per-listing size and optional per-run total, and caps each sale at 99 items before continuing the remainder.");
         ImGui.BulletText("Stop: stops further actions in the current run. Any price changes already submitted remain in place.");
@@ -378,7 +379,7 @@ internal sealed class MainWindow : Window
         ImGui.BulletText("Exceptions: items here are skipped by automatic listing and repricing. Refresh carried inventory to find items, filter by name, add a selected item, or add the current marketable inventory at once. Remove an item to allow it again.");
         ImGui.BulletText("Don't reprice: block price changes to existing listings through Update existing listings, Auto update, or the current-item price controls. Read-only lookups still work. These items can still be listed from your carried inventory; use Exceptions to skip both listing and repricing.");
         ImGui.BulletText("Batch selling: choose items and set the maximum quantity in each listing. The optional total limit caps how much of that item is listed in one batch-only run; 0 means no total cap. Add current inventory adds marketable carried items using the current size and limit.");
-        ImGui.BulletText("Auto vendor: open an NPC vendor Shop window, set the price threshold, and start vendoring. Eligible carried stacks with a complete Universalis listing at or below the threshold are sold to the vendor; exclusions, unmarketable items, missing prices, and your own retainer listings are skipped. Verify every item before starting because vendor sales cannot be undone.");
+        ImGui.BulletText("Auto vendor: open an NPC vendor Shop window, set the price threshold, and start vendoring. Eligible carried stacks with a complete Universalis listing at or below the threshold are sold to the vendor; exclusions, bound items, unmarketable items, missing prices, and your own retainer listings are skipped. Auto vendor opens each inventory action menu and selects Sell itself, so no manual right-click is needed. Verify every item before starting because vendor sales cannot be undone.");
         ImGui.BulletText("Sniper: Start watching scans all marketable items in the selected world, Data Center, or region scope in batches of up to 100, spacing history queries at least one second apart, then listens for new listings across the same scope. Set a 3–14 day sale-history window, deal threshold, minimum sales, and minimum listing value. Ordinary deals below the minimum value are hidden; 1-gil alerts always show. Click the Server header to group by server and the Listing header to sort prices high-to-low or low-to-high. Purchases are manual.");
         ImGui.BulletText("Settings: set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, and optionally compare across your Data Center or region. Data Center and region options cannot be used together.");
 
@@ -560,7 +561,7 @@ internal sealed class MainWindow : Window
                 ? $"the {homeWorld()?.DataCenterName ?? "home-world"} Data Center"
                 : "your home world";
         ImGui.TextWrapped("Auto vendor checks carried marketable inventory and sells whole stacks whose matching HQ/NQ market listing is at or below the threshold. It uses the price scope from Settings and always skips exclusions and your own retainer listings.");
-        ImGui.TextWrapped("Open an NPC vendor's Shop window before starting. Auto vendor checks each stack with Universalis, selects the vendor's Sell action, confirms the full stack, and verifies the inventory change before continuing.");
+        ImGui.TextWrapped("Open an NPC vendor's Shop window before starting. Auto vendor checks each stack with Universalis, opens the inventory menu, selects the vendor's Sell action, confirms the full stack, and verifies the inventory change before continuing. It closes an already-open item menu belonging to this vendor before continuing; bound gear is skipped.");
         ImGui.TextDisabled($"Price scope: {scope}. A missing, incomplete, or failed price check is skipped. Vendor sales cannot be undone; add items to Exceptions before starting if you want to keep them.");
 
         ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
@@ -717,7 +718,7 @@ internal sealed class MainWindow : Window
         else if (controller.InventorySnapshotAt is { } inventoryAt)
         {
             ImGui.TextUnformatted($"Inventory snapshot · {controller.InventoryCandidates.Count} stack(s) · {inventoryAt:HH:mm:ss}");
-            ImGui.TextDisabled($"Skipped {controller.InventoryExceptionSkipped} excluded stack(s) and {controller.InventoryUnmarketableSkipped} untradeable or nonmarketable stack(s).");
+            ImGui.TextDisabled($"Skipped {controller.InventoryExceptionSkipped} excluded stack(s) and {controller.InventoryUnmarketableSkipped} bound, untradeable, or nonmarketable stack(s).");
             DrawInventoryCandidates();
         }
 
@@ -826,7 +827,7 @@ internal sealed class MainWindow : Window
         else if (controller.ExceptionInventorySnapshotAt is { } snapshotAt)
         {
             ImGui.TextUnformatted($"Inventory snapshot · {controller.ExceptionInventoryCandidates.Count} marketable stack(s) · {snapshotAt:HH:mm:ss}");
-            ImGui.TextDisabled($"{controller.ExceptionInventoryUnmarketableSkipped} untradeable or nonmarketable stack(s) omitted.");
+            ImGui.TextDisabled($"{controller.ExceptionInventoryUnmarketableSkipped} bound, untradeable, or nonmarketable stack(s) omitted.");
         }
         else
             ImGui.TextDisabled("Grab carried inventory to populate the picker, or search the full item list below.");

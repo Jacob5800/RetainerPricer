@@ -77,6 +77,8 @@ public sealed class Plugin : IDalamudPlugin
         framework.Update += Update;
         commands.AddHandler("/retainerpricer", new CommandInfo((_, _) => Toggle())
         { HelpMessage = "Open Retainer Pricer: automatically price new listings and review existing listing updates." });
+        commands.AddHandler("/retainer", new CommandInfo((_, _) => Toggle())
+        { HelpMessage = "Open Retainer Pricer." });
     }
 
     private void Dispatch(Action action)
@@ -124,6 +126,7 @@ public sealed class Plugin : IDalamudPlugin
         pluginInterface.UiBuilder.OpenMainUi -= Toggle;
         pluginInterface.UiBuilder.OpenConfigUi -= Toggle;
         commands.RemoveHandler("/retainerpricer");
+        commands.RemoveHandler("/retainer");
         controller.Dispose();
         vendor.Dispose();
         sniper.Dispose();

@@ -2,7 +2,7 @@ namespace RetainerPricer;
 
 internal sealed class AutoVendorController : IDisposable
 {
-    private enum Step { Idle, Begin, Price, ContextMenu, SalePrompt, Confirm, Verify }
+    private enum Step { Idle, Begin, Price, OpenSellContext, ContextMenu, SalePrompt, Confirm, Verify }
 
     private readonly NativeMarketBridge bridge;
     private readonly UniversalisClient universalis;
@@ -79,6 +79,9 @@ internal sealed class AutoVendorController : IDisposable
                     break;
                 case Step.Price:
                     CheckPrice();
+                    break;
+                case Step.OpenSellContext:
+                    OpenSellContext();
                     break;
                 case Step.ContextMenu:
                     WaitForContextMenu();
@@ -163,11 +166,28 @@ internal sealed class AutoVendorController : IDisposable
         targetReduction = item.Quantity;
         if (quantityBefore < targetReduction)
         { Cancel($"Auto vendor stopped because the carried quantity for {item.Name} changed unexpectedly."); return; }
+        step = Step.OpenSellContext;
+        Status = $"{item.Name} is listed at {lowest.Value:N0} gil · preparing its vendor Sell action…";
+    }
+
+    private void OpenSellContext()
+    {
+        if (candidate is not { } item)
+        { Cancel("Auto vendor stopped because the active item was lost."); return; }
+        if (bridge.IsVendorQuantityPromptOpen || bridge.IsVendorConfirmationOpen)
+        { Cancel($"Auto vendor stopped before selling {item.Name}: resolve the open vendor prompt first."); return; }
+        if (bridge.IsVendorContextMenuOpen)
+        {
+            if (!bridge.TryDismissVendorItemContextMenu(out var closeError))
+            { Cancel($"Auto vendor stopped before selling {item.Name}: {closeError}"); return; }
+            Status = $"Closed the already-open vendor item menu. Continuing with {item.Name}…";
+            return;
+        }
         if (!bridge.TryOpenVendorSellContext(item, out var openError))
         { Cancel($"Auto vendor stopped before selling {item.Name}: {openError}"); return; }
         deadline = DateTimeOffset.UtcNow.AddSeconds(8);
         step = Step.ContextMenu;
-        Status = $"{item.Name} is listed at {lowest.Value:N0} gil · opening its vendor Sell action…";
+        Status = $"Opening the vendor Sell action for {item.Name}…";
     }
 
     private void WaitForContextMenu()

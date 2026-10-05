@@ -240,6 +240,11 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         }
         if (!TryGetStock(agentView->SellInventoryType, agentView->SellInventorySlot, out var stock, out error))
             return false;
+        if (IsBound(stock))
+        {
+            error = "This item is bound and cannot be listed on the marketboard.";
+            return false;
+        }
         var quantity = addon->Quantity->Value;
         var price = addon->AskingPrice->Value;
         if (quantity <= 0 || quantity > stock->GetQuantity() || price < 0 || price > MaximumPrice ||
@@ -328,6 +333,9 @@ public sealed unsafe class NativeMarketBridge : IDisposable
                 if (stock == null || stock->IsEmpty() || stock->GetQuantity() == 0) continue;
                 var itemId = stock->GetBaseItemId();
                 if (itemId == 0) continue;
+                // Spiritbond indicates gear is bound to this character, so it can no longer be
+                // transferred or listed even when the base Item row is normally marketable.
+                if (IsBound(stock)) { unmarketableSkipped++; continue; }
                 if (!marketableItemIds.Contains(itemId)) { unmarketableSkipped++; continue; }
                 if (excludedItemIds.Contains(itemId)) { exceptionSkipped++; continue; }
                 var name = ItemName(itemId);
@@ -356,6 +364,7 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         if (stock->IsEmpty()) { error = string.Empty; return true; }
         if (stock->GetBaseItemId() != expected.ItemId || stock->IsHighQuality() != expected.IsHq)
         { error = "The original inventory slot now contains a different item. The batch stopped."; return false; }
+        if (IsBound(stock)) { error = $"{expected.Name} is bound and cannot be listed."; return false; }
         quantity = stock->GetQuantity();
         error = string.Empty;
         return true;
@@ -649,6 +658,11 @@ public sealed unsafe class NativeMarketBridge : IDisposable
             error = "That inventory slot changed after the snapshot. Take a fresh snapshot before opening it.";
             return false;
         }
+        if (IsBound(stock))
+        {
+            error = $"{expected.Name} is bound and cannot be listed. It was skipped.";
+            return false;
+        }
         var agent = AgentRetainer.Instance();
         if (RetainerAgentView.For(agent) == null || !agent->IsAgentActive())
         { error = "The active retainer changed. Reopen its sale list and retry."; return false; }
@@ -659,6 +673,25 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     public bool IsVendorContextMenuOpen => IsAddonVisible("ContextMenu");
     public bool IsVendorQuantityPromptOpen => IsAddonVisible("InputNumeric");
     public bool IsVendorConfirmationOpen => IsAddonVisible("SelectYesno");
+
+    public bool TryDismissVendorItemContextMenu(out string error)
+    {
+        var shop = GetVendorShopAddon();
+        var menu = (AddonContextMenu*)gameGui.GetAddonByName("ContextMenu").Address;
+        var context = AgentInventoryContext.Instance();
+        if (shop == null || menu == null || !menu->IsReady || !menu->IsVisible || context == null ||
+            context->OwnerAddonId != shop->Id)
+        {
+            error = "An unrelated item menu is open. Close it before Auto vendor can continue.";
+            return false;
+        }
+
+        // Auto vendor was explicitly started, and this item menu belongs to the active shop.
+        // Closing it does not select an action or sell anything.
+        menu->Close(true);
+        error = string.Empty;
+        return true;
+    }
 
     public bool TryOpenVendorSellContext(CarriedItemCandidate expected, out string error)
     {
@@ -675,6 +708,8 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         if (stock->GetBaseItemId() != expected.ItemId || stock->IsHighQuality() != expected.IsHq ||
             stock->GetQuantity() != expected.Quantity)
         { error = "The inventory item changed before it could be sold. The vendor run stopped safely."; return false; }
+        if (IsBound(stock))
+        { error = $"{expected.Name} is bound and cannot be sold. It was skipped."; return false; }
         var context = AgentInventoryContext.Instance();
         if (context == null)
         { error = "The game's inventory context menu is not available."; return false; }
@@ -698,8 +733,10 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         if (context->ContextCallbackInfos == null || context->ContextItemCount is <= 0 or > 32 ||
             context->ContexItemStartIndex < 0 || context->ContexItemStartIndex + context->ContextItemCount > 32)
         { error = "The vendor's item actions could not be verified. Nothing was sold."; return false; }
+        if (IsBound(context->TargetInventorySlot))
+        { error = $"{expected.Name} is bound and cannot be sold."; return false; }
 
-        var sellIndex = -1;
+        var sellMenuIndex = -1;
         for (var index = 0; index < context->ContextItemCount; index++)
         {
             var callbackIndex = context->ContexItemStartIndex + index;
@@ -707,13 +744,17 @@ public sealed unsafe class NativeMarketBridge : IDisposable
             if (info->LabelId == 0) continue;
             var label = data.GetExcelSheet<Addon>().GetRow(info->LabelId).Text.ToString().Trim();
             if (!StringComparer.CurrentCultureIgnoreCase.Equals(label, "Sell")) continue;
-            if (sellIndex >= 0)
+            if (sellMenuIndex >= 0)
             { error = "The vendor menu has multiple Sell actions; no choice was made."; return false; }
-            sellIndex = callbackIndex;
+            // The callback array is offset by ContextItemStartIndex, but the menu selection
+            // API and disabled mask use the visible row index (0..ContextItemCount-1).
+            sellMenuIndex = index;
         }
-        if (sellIndex < 0 || context->IsContextItemDisabled(sellIndex))
-        { error = "A usable Sell action was not found in the vendor menu. Nothing was sold."; return false; }
-        if (!menu->OnMenuSelected(sellIndex, 0))
+        if (sellMenuIndex < 0)
+        { error = "The vendor menu does not contain a Sell action for this item. Nothing was sold."; return false; }
+        if (context->IsContextItemDisabled(sellMenuIndex))
+        { error = "The game's Sell action is disabled for this item. Nothing was sold."; return false; }
+        if (!menu->OnMenuSelected(sellMenuIndex, 0))
         { error = "The game did not accept the vendor Sell action."; return false; }
         error = string.Empty;
         return true;
@@ -731,6 +772,8 @@ public sealed unsafe class NativeMarketBridge : IDisposable
             context->TargetInventorySlot->GetBaseItemId() != expected.ItemId ||
             context->TargetInventorySlot->IsHighQuality() != expected.IsHq)
         { error = "The vendor quantity prompt could not be matched to the selected item."; return false; }
+        if (IsBound(context->TargetInventorySlot))
+        { error = $"{expected.Name} is bound and cannot be sold."; return false; }
         var minimum = addon->TypedAtkValues->MinValue.UInt;
         var maximum = addon->TypedAtkValues->MaxValue.UInt;
         if (expected.Quantity > int.MaxValue || expected.Quantity < minimum || expected.Quantity > maximum)
@@ -1030,6 +1073,9 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         error = string.Empty;
         return true;
     }
+
+    private static bool IsBound(InventoryItem* stock) =>
+        stock != null && stock->GetSpiritbondOrCollectability() != 0;
 
     private string ItemName(uint id) => data.GetExcelSheet<Item>().GetRow(id).Name.ToString();
 
