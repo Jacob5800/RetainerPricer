@@ -1,5 +1,20 @@
 # TODO
 
+## Unreleased — Venture cycle and price rules
+
+Implemented:
+
+- Added an opt-in, dedicated venture cycle that uses Retainer Pricer's own retainer picker and game UI controls. It has no AutoRetainer dependency or IPC.
+- Added settings to assign Quick Exploration to idle retainers and repeat completed ventures. Auto update behavior was not changed.
+- Added a saved pricing rule to either match the lowest eligible listing or undercut by 1 gil.
+- Updated the Ventures tab, Settings, help text, and README.
+
+Pending in-game observation:
+
+- At a summoning bell, run the venture cycle with **Run ventures** enabled. Confirm it collects a completed venture, optionally repeats it, assigns Quick Exploration to an idle retainer, and skips a retainer with an ongoing venture.
+- Stop the venture cycle during a retainer transition and confirm it leaves the current game window open without selecting another retainer.
+- Verify matching mode applies the lowest competing price and undercut mode applies one gil below it for manual, new-listing, and existing-listing flows.
+
 ## v0.4.9 — Auto vendor list and quick links
 
 Implemented:

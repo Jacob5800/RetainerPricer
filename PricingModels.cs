@@ -4,6 +4,7 @@ using System.Collections.Generic;
 namespace RetainerPricer;
 
 public enum PriceSource { Universalis, Local }
+public enum PriceStrategy { MatchLowest, UndercutByOne }
 
 public sealed record ItemChoice(uint ItemId, string Name);
 public sealed record CarriedItemCandidate(uint ItemId, string Name, bool IsHq, uint Quantity, int InventoryType, int Slot);

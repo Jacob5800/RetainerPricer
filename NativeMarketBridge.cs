@@ -2,6 +2,7 @@ using Dalamud.Game.Addon.Lifecycle;
 using Dalamud.Game.Addon.Lifecycle.AddonArgTypes;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Memory;
+using Dalamud.Utility;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
@@ -19,6 +20,9 @@ public sealed record MarketSession(ulong ContentId, ulong RetainerId, uint World
     string? DataCenterName = null);
 
 public sealed record RetainerIdentity(ulong RetainerId, string Name);
+
+public sealed record RetainerVentureMenuLabels(string Quit, string ViewReport,
+    IReadOnlyList<string> AssignOptions, string QuickExploration);
 
 internal sealed record RetainerPickerEntry(RetainerIdentity Retainer, bool IsAvailable);
 
@@ -82,6 +86,8 @@ public sealed unsafe class NativeMarketBridge : IDisposable
     public bool IsRetainerMenuVisible => IsAddonVisible("SelectString");
     public bool IsRetainerDialogueVisible => IsAddonVisible("Talk");
     public bool IsRetainerSellListVisible => IsAddonVisible("RetainerSellList");
+    public bool IsVentureTaskAskVisible => IsAddonVisible("RetainerTaskAsk");
+    public bool IsVentureTaskResultVisible => IsAddonVisible("RetainerTaskResult");
     public bool IsLocalSearchBusy
     {
         get
@@ -220,6 +226,93 @@ public sealed unsafe class NativeMarketBridge : IDisposable
         if (manager == null || !manager->IsReady || manager->LastSelectedRetainerId == 0) return false;
         retainerId = manager->LastSelectedRetainerId;
         return true;
+    }
+
+    public bool TryGetActiveRetainerVenture(RetainerIdentity expected, out ushort ventureId, out string error)
+    {
+        ventureId = 0;
+        if (!retainerFieldsSupported)
+        { error = RetainerAvailabilityError ?? "Retainer venture data is unavailable on this client build."; return false; }
+        var manager = RetainerManager.Instance();
+        if (manager == null || !manager->IsReady || manager->LastSelectedRetainerId != expected.RetainerId)
+        { error = "The expected retainer is not selected yet."; return false; }
+        var active = manager->GetActiveRetainer();
+        if (active == null || active->RetainerId != expected.RetainerId || active->NameString != expected.Name)
+        { error = "The selected retainer does not match the venture queue."; return false; }
+        ventureId = active->VentureId;
+        error = string.Empty;
+        return true;
+    }
+
+    public bool TryGetRetainerVentureMenuLabels(out RetainerVentureMenuLabels labels, out string error)
+    {
+        labels = null!;
+        try
+        {
+            var addonSheet = data.GetExcelSheet<Addon>();
+            var quit = addonSheet.GetRow(2383).Text.ToDalamudString().TextValue;
+            var viewReport = addonSheet.GetRow(2385).Text.ToDalamudString().TextValue;
+            var assign = new[]
+            {
+                addonSheet.GetRow(2386).Text.ToDalamudString().TextValue,
+                addonSheet.GetRow(2387).Text.ToDalamudString().TextValue
+            }.Where(text => !string.IsNullOrWhiteSpace(text)).Distinct(StringComparer.Ordinal).ToArray();
+            var bellSheet = data.GetExcelSheet<QuestDialogueTextRow>(name: "custom/000/CmnDefRetainerCall_00010");
+            var quickExploration = bellSheet.GetRow(402).Value.ToString();
+            if (string.IsNullOrWhiteSpace(quit) || string.IsNullOrWhiteSpace(viewReport) ||
+                assign.Length == 0 || string.IsNullOrWhiteSpace(quickExploration))
+            { error = "The game’s localized venture menu labels could not be loaded."; return false; }
+            labels = new RetainerVentureMenuLabels(quit, viewReport, assign, quickExploration);
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"The game’s venture menu labels could not be read: {ex.Message}";
+            return false;
+        }
+    }
+
+    public bool TryRetainerMenuContains(string expectedText, out bool contains, out string error)
+    {
+        contains = false;
+        var menu = (AddonSelectString*)gameGui.GetAddonByName("SelectString").Address;
+        if (menu == null || !menu->IsReady || !menu->IsVisible)
+        { error = "The retainer option menu is not open."; return false; }
+        var popup = menu->PopupMenu.PopupMenu;
+        if (popup.EntryNames == null || popup.EntryCount is <= 0 or > 64)
+        { error = "The retainer option menu entries could not be read safely."; return false; }
+        for (var index = 0; index < popup.EntryCount; index++)
+        {
+            var name = popup.EntryNames[index].Value;
+            if (name == null) continue;
+            var text = MemoryHelper.ReadSeStringNullTerminated((nint)name).TextValue;
+            if (string.Equals(text, expectedText, StringComparison.Ordinal)) contains = true;
+        }
+        error = string.Empty;
+        return true;
+    }
+
+    public bool TryClickVentureResult(bool reassign, out string error)
+    {
+        var addon = (AddonRetainerTaskResult*)gameGui.GetAddonByName("RetainerTaskResult").Address;
+        if (addon == null || !addon->AtkUnitBase.IsReady || !addon->AtkUnitBase.IsVisible)
+        { error = "The venture result window is not ready."; return false; }
+        var button = reassign ? addon->ReassignButton : addon->ConfirmButton;
+        if (button == null || !button->IsEnabled)
+        { error = reassign ? "The venture Reassign button is not enabled." : "The venture Confirm button is not enabled."; return false; }
+        return ClickRegisteredButton(button, &addon->AtkUnitBase, out error);
+    }
+
+    public bool TryClickVentureAssign(out string error)
+    {
+        var addon = (AddonRetainerTaskAsk*)gameGui.GetAddonByName("RetainerTaskAsk").Address;
+        if (addon == null || !addon->AtkUnitBase.IsReady || !addon->AtkUnitBase.IsVisible)
+        { error = "The venture assignment confirmation is not ready."; return false; }
+        var button = addon->AssignButton;
+        if (button == null || !button->IsEnabled)
+        { error = "The venture Assign button is not enabled."; return false; }
+        return ClickRegisteredButton(button, &addon->AtkUnitBase, out error);
     }
 
     public bool TryGetCharacterContext(out ulong contentId, out uint worldId, out string error)

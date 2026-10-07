@@ -17,7 +17,8 @@ public static class PriceCalculator
         uint minimumPrice,
         DateTimeOffset now,
         TimeSpan? maxAge,
-        string? dataCenterName = null)
+        string? dataCenterName = null,
+        PriceStrategy strategy = PriceStrategy.UndercutByOne)
     {
         static PriceProposal Fail(string message, uint lowest = 0, int count = 0) => new(lowest, 0, count, message);
 
@@ -28,6 +29,8 @@ public static class PriceCalculator
             return Fail("These prices belong to another item or market scope. Fetch prices again.");
         if (snapshot.Source is not (PriceSource.Local or PriceSource.Universalis))
             return Fail("The price source is not recognized. Fetch prices again.");
+        if (!Enum.IsDefined(strategy))
+            return Fail("The pricing strategy is not recognized. Choose a pricing strategy and fetch prices again.");
         if (!snapshot.IsComplete)
             return Fail("The market results are incomplete. Refresh price data before applying.");
         if (snapshot.Listings is null || ownRetainerIds is null)
@@ -72,13 +75,13 @@ public static class PriceCalculator
         }
         if (snapshot.Source == PriceSource.Universalis && !hasRecentSale)
             return Fail("Universalis has no sale history for this item in the last 20 days. No price will be applied.", lowest, matches);
-        if (lowest == 1)
+        if (strategy == PriceStrategy.UndercutByOne && lowest == 1)
             return Fail("The lowest competing price is already 1 gil and cannot be undercut.", lowest, matches);
 
-        var suggested = lowest - 1;
+        var suggested = strategy == PriceStrategy.MatchLowest ? lowest : lowest - 1;
         var floor = Math.Max(1u, minimumPrice);
         if (suggested < floor)
-            return Fail($"Undercutting would go below your minimum of {floor:N0} gil. No price will be applied.", lowest, matches);
+            return Fail($"The selected pricing rule would go below your minimum of {floor:N0} gil. No price will be applied.", lowest, matches);
 
         return new(lowest, suggested, matches, null);
     }

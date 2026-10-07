@@ -4,7 +4,7 @@ namespace RetainerPricer;
 
 public sealed class PluginConfig : IPluginConfiguration
 {
-    public int Version { get; set; } = 8;
+    public int Version { get; set; } = 9;
     public bool AutoPriceNewListings { get; set; } = true;
     public bool OpenWithRetainer { get; set; } = true;
     public PriceSource Source { get; set; } = PriceSource.Universalis;
@@ -15,6 +15,10 @@ public sealed class PluginConfig : IPluginConfiguration
     public bool UseRegionPrices { get; set; }
     public bool ShowServerInfoBarButton { get; set; }
     public int MinimumPrice { get; set; } = 1;
+    public PriceStrategy PriceStrategy { get; set; } = PriceStrategy.UndercutByOne;
+    public bool RunVentures { get; set; }
+    public bool AssignQuickExplorationWhenIdle { get; set; } = true;
+    public bool RepeatCompletedVentures { get; set; } = true;
     public int AutoVendorPriceThreshold { get; set; } = 1;
     public List<uint> AutoVendorItemIds { get; set; } = [];
     public int PriceDropUnder10KPercent { get; set; } = 50;
@@ -34,6 +38,7 @@ public sealed class PluginConfig : IPluginConfiguration
     public void Normalize()
     {
         if (!Enum.IsDefined(Source)) Source = PriceSource.Universalis;
+        if (!Enum.IsDefined(PriceStrategy)) PriceStrategy = PriceStrategy.UndercutByOne;
         MaximumAgeMinutes = Math.Clamp(MaximumAgeMinutes, 1, 120);
         UniversalisCacheMinutes = Math.Clamp(UniversalisCacheMinutes, 0, 60);
         if (UseRegionPrices) UseDataCenterPrices = false;

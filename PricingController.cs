@@ -698,9 +698,9 @@ internal sealed class PricingController : IDisposable
                 manualTarget.IsHq, ownRetainerIds,
                 config.UseDataCenterPrices || config.UseRegionPrices ? manualTarget.World.DataCenterName : null);
             if (!hasOwnRetainerIds)
-                ManualQuoteWarning = "Your retainer IDs have not loaded, so this read-only quote may include your own listing. Open any retainer list before relying on the undercut price.";
+                ManualQuoteWarning = "Your retainer IDs have not loaded, so this read-only quote may include your own listing. Open any retainer list before relying on the suggested price.";
             else if (!ManualProposal.CanApply && ManualProposal.Error?.Contains("did not include its retainer ID", StringComparison.OrdinalIgnoreCase) == true)
-                ManualQuoteWarning = "One or more matching listings omit seller identity. Their prices are shown above, but they cannot be excluded safely from an undercut.";
+                ManualQuoteWarning = "One or more matching listings omit seller identity. Their prices are shown above, but they cannot be excluded safely when calculating a price target.";
             FinishManual(ManualProposal.CanApply ? "Price retrieved." : ManualProposal.Error!);
             return;
         }
@@ -1311,7 +1311,7 @@ internal sealed class PricingController : IDisposable
         IReadOnlySet<ulong> ownRetainerIds, string? dataCenterName = null)
         => PriceCalculator.Calculate(snapshot, itemId, worldId, isHq, ownRetainerIds, (uint)config.MinimumPrice,
             DateTimeOffset.UtcNow, config.UseMaximumPriceAge ? TimeSpan.FromMinutes(config.MaximumAgeMinutes) : null,
-            dataCenterName);
+            dataCenterName, config.PriceStrategy);
 
     private bool IsNoReprice(uint itemId) => config.NoRepriceItemIds.Contains(itemId);
 

@@ -25,6 +25,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly PricingController controller;
     private readonly SniperMonitor sniper;
     private readonly AutoVendorController vendor;
+    private readonly VentureController ventures;
     private readonly MainWindow window;
     private IDtrBarEntry? dtrBarEntry;
     private bool wasOpen;
@@ -38,14 +39,14 @@ public sealed class Plugin : IDalamudPlugin
         (this.pluginInterface, this.commands, this.framework, this.log) = (pluginInterface, commands, framework, log);
         this.dtrBar = dtrBar;
         config = pluginInterface.GetPluginConfig() as PluginConfig ?? new PluginConfig();
-        var migrateConfig = config.Version < 8;
-        if (migrateConfig)
+        var migrateConfig = config.Version < 9;
+        if (config.Version < 8)
         {
             // Move users from the former 0.10 default while preserving any custom threshold.
             if (Math.Abs(config.SniperThresholdFraction - 0.10) < 0.000001)
                 config.SniperThresholdFraction = 0.910;
-            config.Version = 8;
         }
+        if (migrateConfig) config.Version = 9;
         config.Normalize();
         if (migrateConfig) pluginInterface.SavePluginConfig(config);
         bridge = new NativeMarketBridge(gameGui, data, player, clientState, condition, addons, interop, sigScanner, log);
@@ -67,8 +68,9 @@ public sealed class Plugin : IDalamudPlugin
         controller = new PricingController(bridge, universalis, config, marketableItemIds);
         sniper = new SniperMonitor(universalis, config, marketableItemChoices, worldNames);
         vendor = new AutoVendorController(bridge, universalis, config, marketableItemIds);
+        ventures = new VentureController(bridge, config);
         window = new MainWindow(config, controller, itemChoices, bridge.GetHomeWorld, Save, Dispatch, UpdateServerInfoBarButton,
-            () => bridge.RetainerAvailabilityError, feedback, sniper, vendor);
+            () => bridge.RetainerAvailabilityError, feedback, sniper, vendor, ventures);
         windows.AddWindow(window);
         UpdateServerInfoBarButton();
         if (bridge.LocalAvailabilityError is { } localCompatibilityError)
@@ -98,6 +100,7 @@ public sealed class Plugin : IDalamudPlugin
                 log.Error(ex, "Retainer Pricer operation failed");
                 controller.Cancel("The operation failed. No further prices will be submitted; see Dalamud's log.");
                 vendor.Cancel("Auto vendor stopped after an unexpected error. Check the vendor window before continuing.");
+                ventures.Cancel("Venture cycle stopped after an unexpected error. Check the current retainer window before continuing.");
             }
         });
     }
@@ -109,6 +112,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             controller.Update();
             vendor.Update();
+            ventures.Update();
             var open = controller.HasRetainer;
             if (config.OpenWithRetainer && open && !wasOpen) window.IsOpen = true;
             wasOpen = open;
@@ -118,6 +122,7 @@ public sealed class Plugin : IDalamudPlugin
             log.Error(ex, "Retainer Pricer stopped after an unexpected error");
             controller.Cancel("Pricing stopped after an unexpected error. Reopen the plugin to check its status.");
             vendor.Cancel("Auto vendor stopped after an unexpected error. Check the vendor window before continuing.");
+            ventures.Cancel("Venture cycle stopped after an unexpected error. Check the current retainer window before continuing.");
         }
     }
 

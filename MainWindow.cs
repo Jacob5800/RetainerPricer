@@ -23,6 +23,7 @@ internal sealed class MainWindow : Window
     private readonly FeedbackClient feedback;
     private readonly SniperMonitor sniper;
     private readonly AutoVendorController vendor;
+    private readonly VentureController ventures;
     private string lookupSearch = "";
     private string lookupSearchCache = "";
     private List<ItemChoice> lookupMatches = [];
@@ -55,13 +56,15 @@ internal sealed class MainWindow : Window
 
     public MainWindow(PluginConfig config, PricingController controller, IReadOnlyList<ItemChoice> itemChoices,
         Func<MarketWorld?> homeWorld, Action save, Action<Action> dispatch, Action updateServerInfoBarButton,
-        Func<string?> retainerError, FeedbackClient feedback, SniperMonitor sniper, AutoVendorController vendor) : base("Retainer Pricer")
+        Func<string?> retainerError, FeedbackClient feedback, SniperMonitor sniper, AutoVendorController vendor,
+        VentureController ventures) : base("Retainer Pricer")
     {
         (this.config, this.controller, this.itemChoices, this.homeWorld, this.save, this.dispatch, this.retainerError) =
             (config, controller, itemChoices, homeWorld, save, dispatch, retainerError);
         this.feedback = feedback;
         this.sniper = sniper;
         this.vendor = vendor;
+        this.ventures = ventures;
         this.updateServerInfoBarButton = updateServerInfoBarButton;
         if (config.Source != PriceSource.Universalis)
         {
@@ -82,7 +85,7 @@ internal sealed class MainWindow : Window
             : "your home world";
         ImGui.TextWrapped($"Universalis prices use {priceScope}. HQ and NQ are compared separately; your own retainers are excluded.");
         if (retainerError() is { } nativeError) ImGui.TextWrapped(nativeError);
-        var busy = controller.Busy || vendor.IsRunning;
+        var busy = controller.Busy || vendor.IsRunning || ventures.IsRunning;
         ImGui.BeginDisabled(busy);
         if (controller.IsAutoUpdatingAllRetainers)
         {
@@ -143,15 +146,16 @@ internal sealed class MainWindow : Window
             if (ImGui.Button("Stop")) dispatch(() =>
             {
                 if (vendor.IsRunning) vendor.Cancel();
+                else if (ventures.IsRunning) ventures.Cancel();
                 else controller.Cancel();
             });
             ImGui.PopStyleColor(3);
         }
-        ImGui.TextDisabled("Auto update can start at the retainer picker and go top-to-bottom, or start with the open selling list. Start listing items processes eligible carried inventory; batch-only processes the Batch selling tab. Update existing listings handles only the open retainer.");
+        ImGui.TextDisabled("Auto update reprices retainers independently. Venture cycle is a separate action in the Ventures tab and uses only this plugin's own controls.");
         if (controller.Busy)
             ImGui.TextDisabled("The active listing task is highlighted. Stop cancels it; changes already submitted remain applied.");
         if (controller.StartListingAvailabilityError is { } pricingError) ImGui.TextWrapped(pricingError);
-        ImGui.BeginDisabled(controller.Busy || sniper.IsRunning || vendor.IsRunning);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || sniper.IsRunning || vendor.IsRunning);
         var automatic = config.AutoPriceNewListings;
         if (ImGui.Checkbox("Automatically price and confirm new listings", ref automatic)) { config.AutoPriceNewListings = automatic; save(); }
         ImGui.TextDisabled("This checkbox auto-prices only the currently opened sale item. Use Start listing items to process all eligible inventory and continue through the list automatically.");
@@ -164,7 +168,7 @@ internal sealed class MainWindow : Window
         ImGui.EndDisabled();
         ImGui.Separator();
 
-        ImGui.TextWrapped(vendor.IsRunning ? vendor.Status : controller.Status);
+        ImGui.TextWrapped(ventures.IsRunning ? ventures.Status : vendor.IsRunning ? vendor.Status : controller.Status);
         if (controller.Busy)
         {
             if (!string.IsNullOrEmpty(controller.Progress)) ImGui.TextUnformatted(controller.Progress);
@@ -179,6 +183,7 @@ internal sealed class MainWindow : Window
             if (ImGui.BeginTabItem("Don't reprice")) { DrawNoReprice(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Batch selling")) { DrawBatchSelling(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Auto vendor")) { DrawAutoVendor(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("Ventures")) { DrawVentures(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Settings")) { DrawSettings(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("?")) { DrawHelp(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Sniper")) { DrawSniper(); ImGui.EndTabItem(); }
@@ -205,7 +210,7 @@ internal sealed class MainWindow : Window
         var protectedExisting = item.IsExisting && config.NoRepriceItemIds.Contains(item.ItemId);
         if (protectedExisting)
             ImGui.TextDisabled("This existing listing is protected by Don't reprice. Remove it from that list before changing its price.");
-        ImGui.BeginDisabled(controller.Busy || protectedExisting);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || protectedExisting);
         if (ImGui.Button("Check price again")) dispatch(() => controller.CheckCurrent());
         ImGui.EndDisabled();
         if (controller.CurrentSnapshot is { } snapshot)
@@ -218,7 +223,7 @@ internal sealed class MainWindow : Window
                     ImGui.TextUnformatted($"Lowest matching listing: {quote.LowestPrice:N0} gil each");
                     ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.6f, 1), $"Your price: {quote.SuggestedPrice:N0} gil each");
                     ImGui.TextUnformatted($"Stack before tax: {(ulong)quote.SuggestedPrice * item.Quantity:N0} gil");
-                    ImGui.BeginDisabled(controller.Busy || protectedExisting);
+                    ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || protectedExisting);
                     if (ImGui.Button("Apply price to selling window")) dispatch(controller.FillCurrent);
                     ImGui.EndDisabled();
                 }
@@ -229,12 +234,12 @@ internal sealed class MainWindow : Window
 
     private void DrawExisting()
     {
-        ImGui.TextWrapped("The Update existing listings button checks eligible items against Universalis, undercuts comparable listings by one gil, and verifies the retainer accepted each change. Excluded and Don't reprice items are skipped. Large price drops use the configurable review bands below for both Update existing listings and Auto update.");
+        ImGui.TextWrapped("The Update existing listings button checks eligible items against Universalis, applies your selected pricing rule, and verifies the retainer accepted each change. Excluded and Don't reprice items are skipped. Large price drops use the configurable review bands below for both Update existing listings and Auto update.");
         if (controller.ExistingUpdateError is { } updateError) ImGui.TextWrapped(updateError);
         if (controller.ExistingApplyError is { } applyError) ImGui.TextWrapped(applyError);
         ImGui.TextUnformatted("Large price-drop review bands");
         ImGui.TextDisabled("A proposal is held when it falls by more than the selected percentage from the current listing price.");
-        ImGui.BeginDisabled(controller.Busy || sniper.IsRunning || vendor.IsRunning);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || sniper.IsRunning || vendor.IsRunning);
         var under10K = config.PriceDropUnder10KPercent;
         ImGui.SetNextItemWidth(145);
         if (ImGui.InputInt("1–9,999 gil (%)", ref under10K))
@@ -282,7 +287,7 @@ internal sealed class MainWindow : Window
                 ImGui.TableNextColumn(); ImGui.TextUnformatted(row.Snapshot is { } data ? Age(data.ObservedAt) : "—");
                 ImGui.TableNextColumn(); ImGui.TextWrapped(row.Status);
                 ImGui.TableNextColumn();
-                ImGui.BeginDisabled(controller.Busy || config.ExcludedItemIds.Contains(row.Item.ItemId));
+                ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || config.ExcludedItemIds.Contains(row.Item.ItemId));
                 if (ImGui.SmallButton("Exclude")) AddExclusion(row.Item.ItemId);
                 ImGui.SameLine();
                 if (ImGui.SmallButton("Protect")) AddNoReprice(row.Item.ItemId);
@@ -306,7 +311,7 @@ internal sealed class MainWindow : Window
         ImGui.TextUnformatted($"Current: {row.Item.CurrentPrice:N0} gil each");
         ImGui.TextUnformatted($"Proposed: {row.Proposal?.SuggestedPrice:N0} gil each");
         ImGui.TextDisabled("The percentage comes from the current listing price's band in Existing listings. Approving retrieves the price again and applies only the fresh result. Auto update continues to the next retainer after all held items are reviewed.");
-        if (ImGui.Button("Still undercut regardless"))
+        if (ImGui.Button("Approve this price"))
         {
             ImGui.CloseCurrentPopup();
             dispatch(controller.ApprovePriceDrop);
@@ -322,7 +327,17 @@ internal sealed class MainWindow : Window
 
     private void DrawSettings()
     {
-        ImGui.BeginDisabled(controller.Busy || sniper.IsRunning || vendor.IsRunning);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || sniper.IsRunning || vendor.IsRunning);
+        var strategy = (int)config.PriceStrategy;
+        ImGui.SetNextItemWidth(260);
+        if (ImGui.Combo("Pricing rule", ref strategy, "Match lowest listing\0Undercut by 1 gil\0"))
+        {
+            config.PriceStrategy = (PriceStrategy)strategy;
+            save();
+        }
+        ImGui.TextDisabled(config.PriceStrategy == PriceStrategy.MatchLowest
+            ? "Prices match the lowest eligible competing listing of the same quality."
+            : "Prices are set 1 gil below the lowest eligible competing listing of the same quality.");
         var minimum = config.MinimumPrice;
         ImGui.SetNextItemWidth(160);
         if (ImGui.InputInt("Minimum price per item (gil)", ref minimum))
@@ -368,8 +383,47 @@ internal sealed class MainWindow : Window
         ImGui.TextDisabled("Off by default. Click the button beside the in-game world and time display to open Retainer Pricer.");
         ImGui.EndDisabled();
         ImGui.Separator();
-        ImGui.TextWrapped("Prices are per item, before tax. If an undercut would be below your minimum, or no matching competitor is available, that item is left unchanged.");
+        ImGui.TextWrapped("Prices are per item, before tax. If the selected pricing rule would go below your minimum, or no matching competitor is available, that item is left unchanged.");
         ImGui.TextWrapped("Changing character, world, or active retainer stops a batch. Each price submission rechecks the exact item window first. Stop prevents further submissions; completed price changes stay applied.");
+    }
+
+    private void DrawVentures()
+    {
+        ImGui.TextWrapped("Run a separate venture cycle from the retainer picker at a summoning bell. The cycle uses the game's own menus and does not use or require AutoRetainer. Auto update remains unchanged.");
+        var busy = controller.Busy || sniper.IsRunning || vendor.IsRunning || ventures.IsRunning;
+        ImGui.BeginDisabled(busy);
+        var runVentures = config.RunVentures;
+        if (ImGui.Checkbox("Run ventures", ref runVentures))
+        { config.RunVentures = runVentures; save(); }
+        ImGui.EndDisabled();
+        ImGui.TextDisabled("This opt-in must be on before the Venture cycle button will run.");
+
+        ImGui.BeginDisabled(busy);
+        var assignIdle = config.AssignQuickExplorationWhenIdle;
+        if (ImGui.Checkbox("Assign Quick Exploration when a retainer is idle", ref assignIdle))
+        { config.AssignQuickExplorationWhenIdle = assignIdle; save(); }
+        var repeatCompleted = config.RepeatCompletedVentures;
+        if (ImGui.Checkbox("Repeat a completed venture", ref repeatCompleted))
+        { config.RepeatCompletedVentures = repeatCompleted; save(); }
+        ImGui.EndDisabled();
+        ImGui.TextDisabled("When repeat is off, completed ventures are collected. If idle assignment is on, the retainer then receives Quick Exploration.");
+        ImGui.Separator();
+
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || sniper.IsRunning || vendor.IsRunning);
+        if (ImGui.Button(ventures.IsRunning ? "Venture cycle running..." : "Start venture cycle"))
+            dispatch(ventures.Start);
+        ImGui.EndDisabled();
+        if (ventures.IsRunning)
+        {
+            ImGui.SameLine();
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.68f, 0.12f, 0.12f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.82f, 0.18f, 0.18f, 1));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.55f, 0.08f, 0.08f, 1));
+            if (ImGui.Button("Stop venture cycle")) dispatch(() => ventures.Cancel());
+            ImGui.PopStyleColor(3);
+        }
+        ImGui.TextWrapped(ventures.Status);
+        ImGui.TextDisabled("Start only while the retainer picker is open. The cycle skips retainers that are unavailable or already have an ongoing venture. If a menu or retainer cannot be verified, it stops and leaves the current game window open.");
     }
 
     private void DrawHelp()
@@ -388,6 +442,7 @@ internal sealed class MainWindow : Window
         ImGui.BulletText("Start listing items: checks eligible items in your carried inventory and lists them one by one. No sale exceeds 99 items; larger stacks continue in follow-up listings. Exceptions, items in saved gear sets, bound items, untradeable items, and items the market does not support are skipped. The run stops when it finishes or the retainer's 20 listing slots are full.");
         ImGui.BulletText("Update existing listings: reprices eligible listings on the currently open retainer. A proposed price drop above the configurable percentage for its current-price band is held for review at the end of that retainer; approve it to recheck and apply, or ignore it. Set the four bands in the Existing listings tab. Auto update uses the same bands and pauses at the same review before moving to the next retainer.");
         ImGui.BulletText("Start batch selling only: lists only the items in the Batch selling tab. It ignores other inventory, respects each item's per-listing size and optional per-run total, and caps each sale at 99 items before continuing the remainder.");
+        ImGui.BulletText("Venture cycle: available in the Ventures tab from the retainer picker. Turn on Run ventures, then choose whether to assign Quick Exploration to idle retainers and whether to repeat completed ventures. It runs independently and does not require AutoRetainer.");
         ImGui.BulletText("Stop: stops further actions in the current run. Any price changes already submitted remain in place.");
 
         ImGui.Separator();
@@ -399,12 +454,13 @@ internal sealed class MainWindow : Window
         ImGui.BulletText("Don't reprice: block price changes to existing listings through Update existing listings, Auto update, or the current-item price controls. Read-only lookups still work. These items can still be listed from your carried inventory; use Exceptions to skip both listing and repricing.");
         ImGui.BulletText("Batch selling: choose items and set the maximum quantity in each listing. The optional total limit caps how much of that item is listed in one batch-only run; 0 means no total cap. Add current inventory adds marketable carried items using the current size and limit.");
         ImGui.BulletText("Auto vendor: open an NPC vendor Shop window, set the price threshold, and start vendoring. Eligible carried stacks with a complete Universalis listing at or below the threshold are sold; items on the Auto vendor list bypass the price check. Exceptions and saved gear-set, bound, untradeable, or nonmarketable items remain protected. Vendor sales cannot be undone.");
+        ImGui.BulletText("Ventures: configure and start the separate venture cycle. It uses the game's own retainer menus, collects completed ventures, can repeat them, and can assign Quick Exploration to idle retainers. Start at the retainer picker; Stop leaves the current game window open.");
         ImGui.BulletText("Sniper: Start watching scans all marketable items in the selected world, Data Center, or region scope in batches of up to 100, spacing history queries at least one second apart, then listens for new listings across the same scope. Set the sale-history window, deal threshold as a percentage of the median (91% by default), minimum sales, and minimum listing value. Ordinary deals below the minimum value are hidden; 1-gil alerts always show. Click the Server header to group by server and the Listing header to sort prices high-to-low or low-to-high. Purchases are manual.");
-        ImGui.BulletText("Settings: set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, optionally compare across your Data Center or region, and show a button beside the game's world/time display to open this window. Data Center and region options cannot be used together.");
+        ImGui.BulletText("Settings: choose whether prices match the lowest competitor or undercut it by 1 gil, set the minimum price, optionally reject old price data, choose how long successful Universalis results are reused, optionally compare across your Data Center or region, and show a button beside the game's world/time display to open this window. Data Center and region options cannot be used together.");
 
         ImGui.Separator();
         ImGui.TextUnformatted("How prices work");
-        ImGui.BulletText("Prices come from Universalis. HQ and normal-quality items are checked separately. The plugin ignores your own retainers and aims for one gil below the lowest matching competitor, while respecting your minimum price.");
+        ImGui.BulletText("Prices come from Universalis. HQ and normal-quality items are checked separately. The plugin ignores your own retainers, then either matches the lowest matching competitor or prices 1 gil below it, according to Settings. Your minimum price is always respected.");
         ImGui.BulletText("Automatic listing and repricing require a current competing listing and a sale within the last 20 days. With the optional age filter off, old price uploads are still allowed; the recent-sale rule remains.");
         ImGui.BulletText("Prices shown are per item and before tax. If there is no safe price, the plugin leaves that item unchanged.");
         ImGui.BulletText("Use this on your home world with a retainer's selling list open. Switching character, world, or active retainer, disconnecting, or entering a loading state stops the active run.");
@@ -594,7 +650,7 @@ internal sealed class MainWindow : Window
         ImGui.TextWrapped("Open an NPC vendor's Shop window before starting. Exceptions and saved gear-set items take priority over the Auto vendor list; bound, untradeable, and nonmarketable items are also skipped. Vendor sales cannot be undone.");
         ImGui.TextDisabled($"Price scope: {scope}. A missing, incomplete, or failed price check is skipped. Vendor sales cannot be undone; add items to Exceptions before starting if you want to keep them. Saved gear-set items are protected automatically.");
 
-        ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || vendor.IsRunning);
         var threshold = config.AutoVendorPriceThreshold;
         ImGui.SetNextItemWidth(170);
         if (ImGui.InputInt("Sell at or below (gil per item)", ref threshold))
@@ -609,7 +665,7 @@ internal sealed class MainWindow : Window
 
         if (!vendor.IsRunning)
         {
-            ImGui.BeginDisabled(controller.Busy);
+            ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
             if (ImGui.Button("Start vendoring")) dispatch(vendor.Start);
             ImGui.EndDisabled();
         }
@@ -632,7 +688,7 @@ internal sealed class MainWindow : Window
         ImGui.TextUnformatted("Auto vendor list");
         ImGui.TextWrapped("Items on this list are always sent to the vendor when they are in carried inventory, without checking their market price. Exceptions, saved gear-set items, bound items, and untradeable or nonmarketable items are still skipped.");
 
-        ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || vendor.IsRunning);
         if (ImGui.Button(controller.ExceptionInventorySnapshotAt is null ? "Grab carried inventory" : "Refresh item picker"))
             dispatch(controller.SnapshotExceptionInventory);
         ImGui.EndDisabled();
@@ -673,7 +729,7 @@ internal sealed class MainWindow : Window
         }
 
         var canAdd = autoVendorSelection is { } choice && !config.AutoVendorItemIds.Contains(choice.ItemId);
-        ImGui.BeginDisabled(controller.Busy || vendor.IsRunning || !canAdd);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || vendor.IsRunning || !canAdd);
         if (ImGui.Button("Add to Auto vendor list") && autoVendorSelection is { } addChoice)
         {
             config.AutoVendorItemIds.Add(addChoice.ItemId);
@@ -684,7 +740,7 @@ internal sealed class MainWindow : Window
         }
         ImGui.EndDisabled();
         ImGui.SameLine();
-        ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || vendor.IsRunning);
         if (ImGui.Button("Add current inventory"))
             dispatch(AddCurrentInventoryToAutoVendor);
         ImGui.EndDisabled();
@@ -711,7 +767,7 @@ internal sealed class MainWindow : Window
                 ImGui.PushID((int)itemId);
                 ImGui.TextUnformatted($"{name}  ·  #{itemId}");
                 ImGui.SameLine();
-                ImGui.BeginDisabled(controller.Busy || vendor.IsRunning);
+                ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || vendor.IsRunning);
                 if (ImGui.SmallButton("Remove"))
                 {
                     config.AutoVendorItemIds.Remove(itemId);
@@ -822,12 +878,12 @@ internal sealed class MainWindow : Window
         {
             ImGui.TextUnformatted($"Selected: {selected.Name} · item {selected.ItemId}");
             var hq = lookupHq;
-            ImGui.BeginDisabled(controller.Busy);
+            ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
             if (ImGui.Checkbox("High Quality", ref hq)) lookupHq = hq;
             ImGui.EndDisabled();
             var world = homeWorld();
             ImGui.TextUnformatted(world is null ? "Waiting for character home-world data." : $"World: {world.Name}");
-            ImGui.BeginDisabled(controller.Busy || world is null);
+            ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || world is null);
             if (ImGui.Button("Retrieve price") && world is not null)
                 dispatch(() => controller.CheckManualItem(selected, lookupHq, world));
             ImGui.EndDisabled();
@@ -849,9 +905,9 @@ internal sealed class MainWindow : Window
                     if (proposal.CanApply)
                     {
                         if (controller.ManualQuoteWarning is null)
-                            ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.6f, 1), $"Suggested undercut: {proposal.SuggestedPrice:N0} gil each");
+                            ImGui.TextColored(new Vector4(0.4f, 0.9f, 0.6f, 1), $"Suggested price ({PricingRuleName}): {proposal.SuggestedPrice:N0} gil each");
                         else
-                            ImGui.TextUnformatted($"Reference undercut: {proposal.SuggestedPrice:N0} gil each");
+                            ImGui.TextUnformatted($"Reference price ({PricingRuleName}): {proposal.SuggestedPrice:N0} gil each");
                     }
                     else
                         ImGui.TextWrapped(proposal.Error ?? "No usable price.");
@@ -866,7 +922,7 @@ internal sealed class MainWindow : Window
         ImGui.Separator();
         ImGui.TextUnformatted("Captured items");
         ImGui.TextWrapped("Open a retainer's selling list and use Start listing items or Start batch selling only above. The first processes all eligible carried inventory; the second processes only items in the Batch selling tab. Both skip untradeable, nonmarketable, and excluded items and stop when the 20 listing slots are full. Use Stop to halt the batch.");
-        ImGui.BeginDisabled(controller.Busy);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
         if (ImGui.Button("Snapshot inventory")) dispatch(controller.SnapshotInventory);
         ImGui.SameLine();
         if (ImGui.Button("Snapshot retainer listings")) dispatch(controller.SnapshotListedItems);
@@ -910,11 +966,11 @@ internal sealed class MainWindow : Window
             ImGui.TableNextColumn(); ImGui.TextWrapped($"{item.Name}{(item.IsHq ? " (HQ)" : " (NQ)")}");
             ImGui.TableNextColumn(); ImGui.TextUnformatted(item.Quantity.ToString("N0"));
             ImGui.TableNextColumn();
-            ImGui.BeginDisabled(controller.Busy || world is null);
+            ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || world is null);
             if (ImGui.SmallButton("Retrieve")) dispatch(() => controller.CheckManualItem(new ItemChoice(item.ItemId, item.Name), item.IsHq, world!));
             ImGui.EndDisabled();
             ImGui.TableNextColumn();
-            ImGui.BeginDisabled(controller.Busy);
+            ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
             if (ImGui.SmallButton("List")) dispatch(() => controller.OpenInventoryItem(item));
             ImGui.SameLine();
             if (ImGui.SmallButton("Exclude")) AddExclusion(item.ItemId);
@@ -944,11 +1000,11 @@ internal sealed class MainWindow : Window
             ImGui.TableNextColumn(); ImGui.TextUnformatted(item.Quantity.ToString("N0"));
             ImGui.TableNextColumn(); ImGui.TextUnformatted(item.CurrentPrice.ToString("N0"));
             ImGui.TableNextColumn();
-            ImGui.BeginDisabled(controller.Busy || world is null);
+            ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || world is null);
             if (ImGui.SmallButton("Retrieve")) dispatch(() => controller.CheckManualItem(new ItemChoice(item.ItemId, item.Name), item.IsHq, world!));
             ImGui.EndDisabled();
             ImGui.SameLine();
-            ImGui.BeginDisabled(controller.Busy);
+            ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
             if (ImGui.SmallButton("Exclude")) AddExclusion(item.ItemId);
             ImGui.EndDisabled();
             ImGui.SameLine();
@@ -956,7 +1012,7 @@ internal sealed class MainWindow : Window
                 ImGui.TextDisabled("Protected");
             else
             {
-                ImGui.BeginDisabled(controller.Busy || config.ExcludedItemIds.Contains(item.ItemId));
+                ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || config.ExcludedItemIds.Contains(item.ItemId));
                 if (ImGui.SmallButton("Don't reprice")) AddNoReprice(item.ItemId);
                 ImGui.EndDisabled();
             }
@@ -978,7 +1034,7 @@ internal sealed class MainWindow : Window
         ImGui.TextUnformatted("Exception list");
         ImGui.TextWrapped("Items in Exceptions are always skipped by automatic listing and existing-listing updates. Items assigned to saved gear sets are also protected automatically, including during Auto vendor. Untradeable and nonmarketable items are omitted automatically. Manual price lookups remain available.");
 
-        ImGui.BeginDisabled(controller.Busy);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
         if (ImGui.Button(controller.ExceptionInventorySnapshotAt is null ? "Grab carried inventory" : "Refresh carried inventory"))
             dispatch(controller.SnapshotExceptionInventory);
         ImGui.EndDisabled();
@@ -1024,7 +1080,7 @@ internal sealed class MainWindow : Window
             ImGui.EndCombo();
         }
         var canAddException = exceptionSelection is { } choice && !config.ExcludedItemIds.Contains(choice.ItemId);
-        ImGui.BeginDisabled(controller.Busy || !canAddException);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || !canAddException);
         if (ImGui.Button("Add to exceptions") && exceptionSelection is { } addChoice)
         {
             AddExclusion(addChoice.ItemId);
@@ -1033,7 +1089,7 @@ internal sealed class MainWindow : Window
         }
         ImGui.EndDisabled();
         ImGui.SameLine();
-        ImGui.BeginDisabled(controller.Busy);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
         if (ImGui.Button("Add current inventory"))
             dispatch(AddCurrentInventoryToExceptions);
         ImGui.EndDisabled();
@@ -1053,7 +1109,7 @@ internal sealed class MainWindow : Window
                 ImGui.PushID((int)itemId);
                 ImGui.TextUnformatted($"{name}  ·  #{itemId}");
                 ImGui.SameLine();
-                ImGui.BeginDisabled(controller.Busy);
+                ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
                 if (ImGui.SmallButton("Remove"))
                 {
                     config.ExcludedItemIds.Remove(itemId);
@@ -1129,7 +1185,7 @@ internal sealed class MainWindow : Window
         }
 
         var canAdd = noRepriceSelection is { } choice && !config.NoRepriceItemIds.Contains(choice.ItemId);
-        ImGui.BeginDisabled(controller.Busy || !canAdd);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || !canAdd);
         if (ImGui.Button("Add to Don't reprice") && noRepriceSelection is { } addChoice)
         {
             AddNoReprice(addChoice.ItemId);
@@ -1153,7 +1209,7 @@ internal sealed class MainWindow : Window
                 ImGui.PushID((int)itemId);
                 ImGui.TextUnformatted($"{name}  ·  #{itemId}");
                 ImGui.SameLine();
-                ImGui.BeginDisabled(controller.Busy);
+                ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
                 if (ImGui.SmallButton("Remove"))
                 {
                     config.NoRepriceItemIds.Remove(itemId);
@@ -1179,7 +1235,7 @@ internal sealed class MainWindow : Window
         ImGui.TextUnformatted("Per-item batch sizes");
         ImGui.TextWrapped("Set a maximum per listing and, for batch-only runs, an optional total limit per item. For example, per listing 5 and total 20 lists no more than 20 items in four batches. A total of 0 means unlimited. Start listing items still processes all inventory, using the per-listing size. Exclusions take priority. Existing listings are not split.");
 
-        ImGui.BeginDisabled(controller.Busy);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
         if (ImGui.Button(controller.ExceptionInventorySnapshotAt is null ? "Grab carried inventory" : "Refresh item picker"))
             dispatch(controller.SnapshotExceptionInventory);
         ImGui.EndDisabled();
@@ -1228,7 +1284,7 @@ internal sealed class MainWindow : Window
         ImGui.InputInt("Maximum total to list per run (0 = unlimited)", ref batchMaximumTotalInput);
         batchMaximumTotalInput = Math.Clamp(batchMaximumTotalInput, 0, 999_999_999);
         var canAddBatchItem = batchSelection is { } choice && !config.BatchSaleQuantities.ContainsKey(choice.ItemId);
-        ImGui.BeginDisabled(controller.Busy || !canAddBatchItem);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning || !canAddBatchItem);
         if (ImGui.Button("Add to batch list") && batchSelection is { } addChoice)
         {
             config.BatchSaleQuantities[addChoice.ItemId] = (uint)batchQuantityInput;
@@ -1239,7 +1295,7 @@ internal sealed class MainWindow : Window
         }
         ImGui.EndDisabled();
         ImGui.SameLine();
-        ImGui.BeginDisabled(controller.Busy);
+        ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
         if (ImGui.Button("Add current inventory"))
             dispatch(AddCurrentInventoryToBatchSelling);
         ImGui.EndDisabled();
@@ -1272,7 +1328,7 @@ internal sealed class MainWindow : Window
             ImGui.TableNextColumn();
             var quantity = (int)Math.Min(entry.Value, 9_999);
             ImGui.SetNextItemWidth(110);
-            ImGui.BeginDisabled(controller.Busy);
+            ImGui.BeginDisabled(controller.Busy || ventures.IsRunning);
             if (ImGui.InputInt("##batchQuantity", ref quantity))
             {
                 config.BatchSaleQuantities[entry.Key] = (uint)Math.Clamp(quantity, 1, 9_999);
@@ -1350,6 +1406,9 @@ internal sealed class MainWindow : Window
             ? $" · cached {Age(retrievedAt)} ago" : "";
         ImGui.TextUnformatted($"{snapshot.Source}: {Age(snapshot.ObservedAt)} old · {snapshot.ObservedAt.ToLocalTime():HH:mm:ss}{history}{cached}");
     }
+
+    private string PricingRuleName => config.PriceStrategy == PriceStrategy.MatchLowest
+        ? "match lowest" : "undercut by 1 gil";
 
     private static string Age(DateTimeOffset time)
     {
